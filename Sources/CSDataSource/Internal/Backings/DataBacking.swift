@@ -14,13 +14,14 @@ import Glibc
 #endif
 
 struct DataBacking {
-    let data: ContiguousArray<UInt8>
+    var data: ContiguousArray<UInt8>
 
     init(data: some Sequence<UInt8>) {
         self.data = ContiguousArray(data)
     }
 
     var size: UInt64 { UInt64(self.data.count) }
+    var isEmpty: Bool { self.data.isEmpty }
 
     func getBytes(_ buffer: UnsafeMutableBufferPointer<UInt8>, in _range: Range<UInt64>) throws -> Int {
         let range = _range.clamped(to: 0..<self.size)
@@ -32,5 +33,9 @@ struct DataBacking {
 
     subscript(index: UInt64) -> UInt8 {
         self.data[Int(index)]
+    }
+
+    mutating func replaceSubrange(_ range: Range<UInt64>, with bytes: some Collection<UInt8>) {
+        self.data.replaceSubrange(Int(range.lowerBound)..<Int(range.upperBound), with: bytes)
     }
 }

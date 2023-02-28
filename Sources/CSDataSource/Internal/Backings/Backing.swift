@@ -22,7 +22,7 @@ extension CSDataSource {
     enum Backing {
         case data(DataBacking)
         case file(FileBacking)
-        case rsrcFork(ResourceForkBacking)
+        case composite(ContiguousArray<Backing>)
 
         init(data: some Sequence<UInt8>) {
             self = .data(DataBacking(data: data))
@@ -69,9 +69,13 @@ extension CSDataSource {
 
         init(fileDescriptor: Int32, isResourceFork: Bool) throws {
             if isResourceFork {
-                self = .rsrcFork(try ResourceForkBacking(fileDescriptor: fileDescriptor))
+                self = .file(try FileBacking(resourceForkForFileDescriptor: fileDescriptor))
+            } else if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) {
+                self = .file(
+                    try FileBacking(fileDescriptor: FileDescriptor(rawValue: fileDescriptor))
+                )
             } else {
-                self = .file(try FileBacking(fileDescriptor: fileDescriptor))
+                self = .file(try FileBacking(legacyFileDescriptor: fileDescriptor))
             }
         }
 
@@ -81,8 +85,8 @@ extension CSDataSource {
                 return backing.size
             case .file(let backing):
                 return backing.size
-            case .rsrcFork(let backing):
-                return backing.size
+            case .composite(let backings):
+                return backings.reduce(0) { $0 + $1.size }
             }
         }
 
@@ -91,7 +95,7 @@ extension CSDataSource {
                 switch self {
                 case .data(let backing):
                     return backing.data
-                case .file, .rsrcFork:
+                case .file, .composite:
                     return try self.data(in: 0..<self.size)
                 }
             }
@@ -107,7 +111,10 @@ extension CSDataSource {
             }
         }
 
-        func getBytes(_ bytes: UnsafeMutableBufferPointer<UInt8>, in _range: some RangeExpression<UInt64>) throws -> Int {
+        private func getBytes(
+            _ bytes: UnsafeMutableBufferPointer<UInt8>,
+            in _range: some RangeExpression<UInt64>
+        ) throws -> Int {
             let range = _range.relative(to: self)
 
             switch self {
@@ -115,8 +122,37 @@ extension CSDataSource {
                 return try backing.getBytes(bytes, in: range)
             case .file(let backing):
                 return try backing.getBytes(bytes, in: range)
-            case .rsrcFork(let backing):
-                return try backing.getBytes(bytes, in: range)
+            case .composite(let backings):
+                assert(bytes.count >= range.count)
+
+                var inputCursor: UInt64 = 0
+                var outputCursor = bytes.baseAddress!
+                var totalBytesWritten = 0
+
+                for eachBacking in backings where inputCursor < range.upperBound && eachBacking.size != 0 {
+                    let eachSize = eachBacking.size
+                    let nextCursor = inputCursor + eachSize
+                    defer { inputCursor = nextCursor }
+
+                    let clampedRange = range.clamped(to: inputCursor..<nextCursor)
+
+                    if !clampedRange.isEmpty {
+                        let lowerBound = clampedRange.lowerBound - inputCursor
+                        let upperBound = lowerBound + UInt64(clampedRange.count)
+                        let subrange = lowerBound..<upperBound
+                        let subBytes = UnsafeMutableBufferPointer(start: outputCursor, count: subrange.count)
+
+                        assert(subBytes.baseAddress! + subBytes.count <= bytes.baseAddress! + range.count)
+
+                        let bytesWritten = try eachBacking.getBytes(subBytes, in: subrange)
+                        assert(bytesWritten == subrange.count)
+
+                        totalBytesWritten += bytesWritten
+                        outputCursor += bytesWritten
+                    }
+                }
+
+                return totalBytesWritten
             }
         }
 
@@ -125,8 +161,126 @@ extension CSDataSource {
             case .data: break
             case .file(let backing):
                 try backing.closeFile()
-            case .rsrcFork(let backing):
-                try backing.closeFile()
+            case .composite(let backings):
+                for eachBacking in backings {
+                    try eachBacking.closeFile()
+                }
+            }
+        }
+
+        mutating func replaceSubrange(_ r: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
+            let range = r.relative(to: self)
+
+            switch self {
+            case .data(var backing):
+                backing.replaceSubrange(range, with: bytes)
+                self = .data(backing)
+            case .file(let backing):
+                let rangeBefore = 0..<range.lowerBound
+                let rangeAfter = range.upperBound..<backing.size
+
+                var backings: ContiguousArray<Backing> = []
+
+                if !rangeBefore.isEmpty {
+                    backings.append(.file(backing.slice(range: rangeBefore)))
+                }
+
+                if !bytes.isEmpty {
+                    backings.append(.data(DataBacking(data: bytes)))
+                }
+
+                if !rangeAfter.isEmpty {
+                    backings.append(.file(backing.slice(range: rangeAfter)))
+                }
+
+                self.setComposite(backings)
+            case .composite(let backings):
+                self.replaceSubrange(range, inComposite: backings, with: bytes)
+            }
+        }
+
+        mutating func replaceSubrange(
+            _ range: Range<UInt64>,
+            inComposite backings: ContiguousArray<Backing>,
+            with bytes: some Collection<UInt8>
+        ) {
+            var prefix: ContiguousArray<Backing> = []
+            var suffix: ContiguousArray<Backing> = []
+            var alreadyReplaced = false
+            var cursor: UInt64 = 0
+
+            for eachChunk in backings {
+                let nextCursor = cursor + eachChunk.size
+                defer { cursor = nextCursor }
+
+                if range.lowerBound >= nextCursor {
+                    // Entire chunk falls before the replacement range
+                    prefix.append(eachChunk)
+                } else if range.upperBound <= cursor {
+                    // Entire chunk falls after the replacement range
+                    suffix.append(eachChunk)
+                } else {
+                    // A portion of the chunk falls inside the replacement range
+                    var newChunk = eachChunk
+                    let clampedRange = range.clamped(to: cursor..<nextCursor)
+                    let shiftedRange = (clampedRange.lowerBound - cursor)..<(clampedRange.upperBound - cursor)
+
+                    if alreadyReplaced {
+                        newChunk.replaceSubrange(shiftedRange, with: [])
+                    } else {
+                        newChunk.replaceSubrange(shiftedRange, with: bytes)
+                        alreadyReplaced = true
+                    }
+
+                    prefix.append(newChunk)
+                }
+            }
+
+            var newBackings = prefix
+
+            if !alreadyReplaced {
+                newBackings.append(.data(DataBacking(data: bytes)))
+            }
+
+            newBackings += suffix
+
+            self.setComposite(newBackings)
+        }
+
+        private mutating func setComposite(_ backings: ContiguousArray<Backing>) {
+            var compacted: ContiguousArray<Backing> = []
+
+            for eachBacking in backings {
+                eachBacking.compact(into: &compacted)
+            }
+
+            if compacted.isEmpty {
+                self = .data(DataBacking(data: []))
+            } else if compacted.count == 1 {
+                self = compacted[0]
+            } else {
+                self = .composite(compacted)
+            }
+        }
+
+        private func compact(into compacted: inout ContiguousArray<Backing>) {
+            switch self {
+            case .data(let backing):
+                if !backing.isEmpty {
+                    if case .data(let prevBacking) = compacted.last {
+                        compacted[compacted.count - 1] = .data(DataBacking(data: prevBacking.data + backing.data))
+                    } else {
+                        compacted.append(self)
+                    }
+                }
+            case .file(let backing):
+                if !backing.isEmpty {
+                    compacted.append(self)
+                }
+            case .composite(let backings):
+                for eachBacking in backings {
+                    eachBacking.compact(into: &compacted)
+                }
             }
         }
 

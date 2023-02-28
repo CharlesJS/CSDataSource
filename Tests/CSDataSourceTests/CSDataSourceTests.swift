@@ -7,7 +7,7 @@ import System
 @available(macOS 13.0, *)
 final class CSDataSourceTests: XCTestCase {
     private func testDataSource(_ dataSourceMaker: ([UInt8]) throws -> CSDataSource) rethrows {
-        for eachVersion in [10, 13] {
+        for eachVersion in [10, 11, .max] {
             try emulateOSVersion(eachVersion) {
                 let testData: [UInt8] = [0x46, 0x6f, 0x6f, 0, 0x42, 0x61, 0x72, 0, 0x42, 0x7a, 0x72, 0, 0x42, 0x61, 0x7a]
                 let dataSource = try dataSourceMaker(testData)
@@ -80,9 +80,61 @@ final class CSDataSourceTests: XCTestCase {
                 XCTAssertEqual(largeDataSource.range(of: [0x51, 0x75, 0x78], options: .backwards), 0..<3)
                 XCTAssertEqual(largeDataSource.range(of: [0x46, 0x6f, 0x6f]), 3..<6)
                 XCTAssertEqual(largeDataSource.range(of: [0x46, 0x6f, 0x6f], options: .backwards), 0x1ffffb..<0x1ffffe)
+
+                try self.checkMutations(dataSourceMaker: dataSourceMaker)
             }
         }
     }
+
+    private func checkMutations(dataSourceMaker: ([UInt8]) throws -> CSDataSource) throws {
+        let originalDataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+        var dataSource = originalDataSource
+
+        XCTAssertEqual(dataSource.size, 10)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        dataSource.replaceSubrange(0..<3, with: [])
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [3, 4, 5, 6, 7, 8, 9])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [3, 4, 5])
+        XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [6, 7, 8])
+
+        dataSource = originalDataSource
+        dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
+        XCTAssertEqual(dataSource.size, 11)
+        XCTAssertEqual(try Array(dataSource.data), [0x0a, 0x0b, 0x0c, 0x0d, 3, 4, 5, 6, 7, 8, 9])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<5)), [0x0a, 0x0b, 0x0c, 0x0d, 3])
+        XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [0x0d, 3, 4])
+
+        dataSource = originalDataSource
+        dataSource.replaceSubrange(7..<10, with: [])
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
+        XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [3, 4, 5])
+
+        dataSource = originalDataSource
+        dataSource.replaceSubrange(3..<6, with: [])
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 6, 7, 8, 9])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
+        XCTAssertEqual(try Array(dataSource.data(in: 2..<6)), [2, 6, 7, 8])
+
+        dataSource = originalDataSource
+        dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
+        XCTAssertEqual(dataSource.size, 13)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 3, 4, 5, 6, 7, 8, 9])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
+        XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 3])
+
+        dataSource = originalDataSource
+        dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
+        XCTAssertEqual(dataSource.size, 10)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 6, 7, 8, 9])
+        XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
+        XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 6])
+    }
+
 
     func testData() {
         self.testDataSource { CSDataSource($0) }
@@ -131,7 +183,7 @@ final class CSDataSourceTests: XCTestCase {
             XCTAssertEqual(ftruncate(descriptor.rawValue, 0), 0)
             try descriptor.writeAll($0)
 
-            return try CSDataSource(fileDescriptor: descriptor, closeOnDeinit: false)
+            return try CSDataSource(fileDescriptor: descriptor, closeWhenDone: false)
         }
 
         try self.testDataSource {
@@ -139,7 +191,18 @@ final class CSDataSourceTests: XCTestCase {
             XCTAssertEqual(ftruncate(descriptor.rawValue, 0), 0)
             try descriptor.writeAll($0)
 
-            return try CSDataSource(fileDescriptor: descriptor.rawValue, closeOnDeinit: false)
+            return try CSDataSource(fileDescriptor: descriptor.rawValue, closeWhenDone: false)
+        }
+
+        try self.testDataSource {
+            try descriptor.seek(offset: 0, from: .start)
+            XCTAssertEqual(ftruncate(descriptor.rawValue, 0), 0)
+            try descriptor.writeAll($0)
+
+            return try CSDataSource(
+                fileHandle: FileHandle(fileDescriptor: dup(descriptor.rawValue), closeOnDealloc: false),
+                closeWhenDone: false
+            )
         }
 
         try self.testDataSource {
@@ -147,7 +210,7 @@ final class CSDataSourceTests: XCTestCase {
             try Data($0).write(to: newURL)
             let newDescriptor = try FileDescriptor.open(newURL.path, .readOnly)
 
-            return try CSDataSource(fileDescriptor: newDescriptor, closeOnDeinit: true)
+            return try CSDataSource(fileDescriptor: newDescriptor, closeWhenDone: true)
         }
 
         try self.testDataSource {
@@ -155,13 +218,13 @@ final class CSDataSourceTests: XCTestCase {
             try Data($0).write(to: newURL)
             let newDescriptor = try FileDescriptor.open(newURL.path, .readOnly)
 
-            return try CSDataSource(fileDescriptor: newDescriptor.rawValue, closeOnDeinit: true)
+            return try CSDataSource(fileDescriptor: newDescriptor.rawValue, closeWhenDone: true)
         }
 
         XCTAssertNoThrow(try descriptor.seek(offset: 0, from: .start))
 
         do {
-            _ = try CSDataSource(fileDescriptor: descriptor, closeOnDeinit: true)
+            _ = try CSDataSource(fileDescriptor: descriptor, closeWhenDone: true)
         }
 
         XCTAssertThrowsError(try descriptor.seek(offset: 0, from: .start)) {
@@ -189,27 +252,27 @@ final class CSDataSourceTests: XCTestCase {
         }
     }
 
+    func testComposite() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { _ = try? FileManager.default.removeItem(at: url) }
+
+        try self.testDataSource {
+            try Data($0[3...]).write(to: url)
+            var dataSource = try CSDataSource(url: url)
+            dataSource.replaceSubrange(0..<0, with: $0[..<3])
+            return dataSource
+        }
+
+        try self.testDataSource {
+            try Data([$0[0]] + $0[4...]).write(to: url)
+            var dataSource = try CSDataSource(url: url)
+            dataSource.replaceSubrange(1..<1, with: $0[1..<4])
+            return dataSource
+        }
+    }
+
     func testFileDescriptorsAreClosedOnError() throws {
-        func isDescriptorOpen(_ fd: Int32) throws -> Bool {
-            do {
-                try callPOSIXFunction(expect: .notSpecific(-1)) { fcntl(fd, F_GETFD) }
-                return true
-            } catch Errno.badFileDescriptor {
-                return false
-            } catch {
-                throw error
-            }
-        }
-
-        func getOpenFileDescriptors() throws -> [Int32] {
-            try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").compactMap {
-                guard let fd = Int32($0) else { throw CocoaError(.fileReadUnknown) }
-
-                return try isDescriptorOpen(fd) ? fd : nil
-            }
-        }
-
-        let initialDescriptors = try getOpenFileDescriptors()
+        let initialDescriptors = try self.getOpenFileDescriptors()
 
         for eachVersion in [10, 11, 12, 13] {
             try emulateOSVersion(eachVersion) {
@@ -217,13 +280,13 @@ final class CSDataSourceTests: XCTestCase {
                     XCTAssertEqual($0 as? Errno, .notPermitted)
                 }
                 
-                XCTAssertEqual(try getOpenFileDescriptors(), initialDescriptors)
+                XCTAssertEqual(try self.getOpenFileDescriptors(), initialDescriptors)
                 
                 XCTAssertThrowsError(try CSDataSource(path: String("/dev/null"), isResourceFork: true)) {
                     XCTAssertEqual($0 as? Errno, .notPermitted)
                 }
                 
-                XCTAssertEqual(try getOpenFileDescriptors(), initialDescriptors)
+                XCTAssertEqual(try self.getOpenFileDescriptors(), initialDescriptors)
             }
         }
     }
@@ -237,6 +300,59 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertNil(CSDataSource([0x01]).range(of: [], options: .anchored))
     }
 
+    func testCloseFileTwiceDoesNotError() throws {
+        func testClosingTwice(_ dataSource: CSDataSource) throws {
+            let originalDescriptors = try self.getOpenFileDescriptors()
+
+            try dataSource.closeFile()
+
+            let newDescriptors = try self.getOpenFileDescriptors()
+
+            XCTAssertEqual(newDescriptors.count, originalDescriptors.count - 1)
+
+            XCTAssertNoThrow(try dataSource.closeFile())
+
+            XCTAssertEqual(try self.getOpenFileDescriptors(), newDescriptors)
+        }
+
+        let startingDescriptors = try self.getOpenFileDescriptors()
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { _ = try? FileManager.default.removeItem(at: url) }
+        try Data([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).write(to: url)
+
+        try testClosingTwice(CSDataSource(url: url))
+        try testClosingTwice(CSDataSource(path: FilePath(url.path)))
+        try testClosingTwice(CSDataSource(path: url.path))
+        try testClosingTwice(CSDataSource(fileHandle: FileHandle(forReadingFrom: url), closeWhenDone: false))
+        try testClosingTwice(CSDataSource(fileDescriptor: FileDescriptor.open(url.path, .readOnly), closeWhenDone: false))
+        try testClosingTwice(
+            CSDataSource(fileDescriptor: FileDescriptor.open(url.path, .readOnly).rawValue, closeWhenDone: false)
+        )
+        try testClosingTwice(try {
+            var dataSource = try CSDataSource(url: url)
+            dataSource.replaceSubrange(0..<3, with: [1, 2, 3])
+            return dataSource
+        }())
+
+        XCTAssertEqual(try self.getOpenFileDescriptors(), startingDescriptors)
+    }
+
+    func testCloseDataIsNoOp() throws {
+        let originalDescriptors = try self.getOpenFileDescriptors()
+
+        let dataSource = CSDataSource([1, 2, 3])
+
+        XCTAssertEqual(try self.getOpenFileDescriptors(), originalDescriptors)
+
+        try dataSource.closeFile()
+
+        XCTAssertEqual(try self.getOpenFileDescriptors(), originalDescriptors)
+
+        XCTAssertNoThrow(try dataSource.closeFile())
+
+        XCTAssertEqual(try self.getOpenFileDescriptors(), originalDescriptors)
+    }
+
     func testSearchClosedFile() throws {
         let handle = try FileHandle(forReadingFrom: URL(filePath: "/dev/zero"))
         let dataSource: CSDataSource
@@ -247,5 +363,24 @@ final class CSDataSourceTests: XCTestCase {
 
         XCTAssertNil(dataSource.range(of: [0, 0, 0]))
         XCTAssertNil(dataSource.range(of: [0, 0, 0], options: .anchored))
+    }
+
+    private func isDescriptorOpen(_ fd: Int32) throws -> Bool {
+        do {
+            try callPOSIXFunction(expect: .notSpecific(-1)) { fcntl(fd, F_GETFD) }
+            return true
+        } catch Errno.badFileDescriptor {
+            return false
+        } catch {
+            throw error
+        }
+    }
+
+    private func getOpenFileDescriptors() throws -> [Int32] {
+        try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").compactMap {
+            guard let fd = Int32($0) else { throw CocoaError(.fileReadUnknown) }
+
+            return try self.isDescriptorOpen(fd) ? fd : nil
+        }
     }
 }

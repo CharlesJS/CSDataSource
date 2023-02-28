@@ -16,7 +16,7 @@ import Darwin
 import Glibc
 #endif
 
-public class CSDataSource {
+public struct CSDataSource {
     public struct SearchOptions: OptionSet {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
@@ -26,41 +26,46 @@ public class CSDataSource {
         public static let caseInsensitive = SearchOptions(rawValue: 1 << 2)
     }
 
+    private class CloseTask {
+        let backing: Backing
+        init(backing: Backing) {
+            self.backing = backing
+        }
+
+        deinit {
+            _ = try? self.backing.closeFile()
+        }
+    }
+
     public init(_ data: some Sequence<UInt8>) {
         self.backing = Backing(data: data)
-        self.closeOnDeinit = true
+        self.closeTask = nil
     }
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
-    public init(fileDescriptor: FileDescriptor, isResourceFork: Bool = false, closeOnDeinit: Bool = false) throws {
+    public init(fileDescriptor: FileDescriptor, isResourceFork: Bool = false, closeWhenDone: Bool = false) throws {
         self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: isResourceFork)
-        self.closeOnDeinit = closeOnDeinit
+        self.closeTask = closeWhenDone ? CloseTask(backing: self.backing) : nil
     }
 
-    public init(fileDescriptor: Int32, isResourceFork: Bool = false, closeOnDeinit: Bool = false) throws {
+    public init(fileDescriptor: Int32, isResourceFork: Bool = false, closeWhenDone: Bool = false) throws {
         self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: isResourceFork)
-        self.closeOnDeinit = closeOnDeinit
+        self.closeTask = closeWhenDone ? CloseTask(backing: self.backing) : nil
     }
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public init(path: FilePath, isResourceFork: Bool = false) throws {
         self.backing = try Backing(path: path, isResourceFork: isResourceFork)
-        self.closeOnDeinit = true
+        self.closeTask = CloseTask(backing: self.backing)
     }
 
     public init(path: String, isResourceFork: Bool = false) throws {
         self.backing = try Backing(path: path, isResourceFork: isResourceFork)
-        self.closeOnDeinit = true
+        self.closeTask = CloseTask(backing: self.backing)
     }
 
-    deinit {
-        if self.closeOnDeinit {
-            _ = try? self.backing.closeFile()
-        }
-    }
-
-    private let backing: Backing
-    private let closeOnDeinit: Bool
+    private var backing: Backing
+    private let closeTask: CloseTask?
 
     public var data: some DataProtocol {
         get throws { try self.backing.data }
@@ -90,5 +95,13 @@ public class CSDataSource {
         }
 
         return self.backing.range(of: bytes, options: options, in: (0..<self.size) as Range<UInt64>)
+    }
+
+    public func closeFile() throws {
+        try self.backing.closeFile()
+    }
+
+    public mutating func replaceSubrange(_ range: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
+        self.backing.replaceSubrange(range, with: bytes)
     }
 }
