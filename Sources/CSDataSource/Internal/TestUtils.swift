@@ -7,7 +7,7 @@
 
 #if DEBUG
 private var emulatedOSVersion = Int.max
-@_spi(CSDataSourceInternal) public func checkVersion(_ requiredVersion: Int) -> Bool { emulatedOSVersion >= requiredVersion }
+package func checkVersion(_ requiredVersion: Int) -> Bool { emulatedOSVersion >= requiredVersion }
 func emulateOSVersion<T>(_ version: Int, closure: () throws -> T) rethrows -> T {
     emulatedOSVersion = version
     defer { emulatedOSVersion = .max }
@@ -15,5 +15,5 @@ func emulateOSVersion<T>(_ version: Int, closure: () throws -> T) rethrows -> T 
     return try closure()
 }
 #else
-@_spi(CSDataSourceInternal) public func checkVersion(_: Int) -> Bool { true }
+package func checkVersion(_: Int) -> Bool { true }
 #endif

@@ -14,8 +14,44 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CharlesJS/CSErrors",
       "state" : {
-        "revision" : "96ba248344a3f67454ccae3076f7fc88d783c2b0",
-        "version" : "1.2.0"
+        "revision" : "86c2073c171adb3aab6a287c9c3f424318965f34",
+        "version" : "1.2.5"
+      }
+    },
+    {
+      "identity" : "csfileinfo",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CharlesJS/CSFileInfo",
+      "state" : {
+        "revision" : "3db16415896212e4bc4edafdc820fe207f428406",
+        "version" : "0.4.1"
+      }
+    },
+    {
+      "identity" : "csfilemanager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CharlesJS/CSFileManager",
+      "state" : {
+        "revision" : "6f5f6d8aa31719d72856d9b7c56566ff24c1c100",
+        "version" : "0.3.2"
+      }
+    },
+    {
+      "identity" : "dataparser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CharlesJS/DataParser",
+      "state" : {
+        "revision" : "d3c52728ae4799c7a2554957df53071e2b56c6df",
+        "version" : "0.3.2"
+      }
+    },
+    {
+      "identity" : "swift-extras-base64",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-extras/swift-extras-base64.git",
+      "state" : {
+        "revision" : "97237cf1bc1feebaeb0febec91c1e1b9e4d839b3",
+        "version" : "0.7.0"
       }
     }
   ],

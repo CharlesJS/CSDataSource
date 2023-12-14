@@ -1,6 +1,8 @@
 import XCTest
 @testable import CSDataSource
 @testable import CSDataSource_Foundation
+import CSFileInfo
+import CSFileInfo_Foundation
 import CSErrors
 import System
 
@@ -73,13 +75,22 @@ final class CSDataSourceTests: XCTestCase {
                 XCTAssertEqual(dataSource.range(of: [0x6f, 0x6f]), 1..<3)
                 XCTAssertNil(dataSource.range(of: [0x6f, 0x6f], options: .anchored))
 
-                let largeDataSource = try dataSourceMaker(
-                    [0x51, 0x75, 0x78, 0x46, 0x6f, 0x6f] + Data(count: 0x1ffff5) + testData
-                )
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: testData, replace: false, atomic: true)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: testData, replace: false, atomic: false)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: testData, replace: true, atomic: true)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: testData, replace: true, atomic: false)
+
+                let largeTestData = [0x51, 0x75, 0x78, 0x46, 0x6f, 0x6f] + Data(count: 0x1ffff5) + testData
+                let largeDataSource = try dataSourceMaker(largeTestData)
                 XCTAssertEqual(largeDataSource.range(of: [0x42, 0x61, 0x72]), 0x1fffff..<0x200002)
                 XCTAssertEqual(largeDataSource.range(of: [0x51, 0x75, 0x78], options: .backwards), 0..<3)
                 XCTAssertEqual(largeDataSource.range(of: [0x46, 0x6f, 0x6f]), 3..<6)
                 XCTAssertEqual(largeDataSource.range(of: [0x46, 0x6f, 0x6f], options: .backwards), 0x1ffffb..<0x1ffffe)
+
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: largeTestData, replace: false, atomic: true)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: largeTestData, replace: false, atomic: false)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: largeTestData, replace: true, atomic: true)
+                try self.testSave(dataSourceMaker: dataSourceMaker, data: largeTestData, replace: true, atomic: false)
 
                 try self.checkMutations(dataSourceMaker: dataSourceMaker)
             }
@@ -99,35 +110,35 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [3, 4, 5])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [6, 7, 8])
 
-        dataSource = originalDataSource
+        dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
         XCTAssertEqual(dataSource.size, 11)
         XCTAssertEqual(try Array(dataSource.data), [0x0a, 0x0b, 0x0c, 0x0d, 3, 4, 5, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<5)), [0x0a, 0x0b, 0x0c, 0x0d, 3])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [0x0d, 3, 4])
 
-        dataSource = originalDataSource
+        dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         dataSource.replaceSubrange(7..<10, with: [])
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [3, 4, 5])
 
-        dataSource = originalDataSource
+        dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         dataSource.replaceSubrange(3..<6, with: [])
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 2..<6)), [2, 6, 7, 8])
 
-        dataSource = originalDataSource
+        dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
         XCTAssertEqual(dataSource.size, 13)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 3, 4, 5, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 3])
 
-        dataSource = originalDataSource
+        dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
         XCTAssertEqual(dataSource.size, 10)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 6, 7, 8, 9])
@@ -135,6 +146,86 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 6])
     }
 
+    private func testSave(
+        dataSourceMaker: ([UInt8]) throws -> CSDataSource,
+        data: [UInt8],
+        replace: Bool,
+        atomic: Bool
+    ) throws {
+        let tempDir = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { _ = try? FileManager.default.removeItem(at: tempDir) }
+
+        func generateTestFileURL() throws -> URL {
+            let url = tempDir.appending(path: UUID().uuidString)
+
+            if replace {
+                try "Existing data".data(using: .utf8)!.write(to: url)
+            }
+
+            return url
+        }
+
+        var testFile = try generateTestFileURL()
+        var dataSource = try dataSourceMaker(data)
+        try dataSource.write(to: FilePath(testFile.path), inResourceFork: false, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+
+        testFile = try generateTestFileURL()
+        dataSource = try dataSourceMaker(data)
+        try dataSource.write(toPath: testFile.path, inResourceFork: false, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+        
+        testFile = try generateTestFileURL()
+        dataSource = try dataSourceMaker(data)
+        try dataSource.write(to: testFile, inResourceFork: false, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+
+        let dummyData = "foo bar baz".data(using: .utf8)!
+
+        testFile = try generateTestFileURL()
+        try dummyData.write(to: testFile)
+        dataSource = try dataSourceMaker(data)
+        try dataSource.write(to: FilePath(testFile.path), inResourceFork: true, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
+        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+
+        testFile = try generateTestFileURL()
+        try dummyData.write(to: testFile)
+        dataSource = try dataSourceMaker(data)
+        try dataSource.write(toPath: testFile.path, inResourceFork: true, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
+        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+
+        testFile = try generateTestFileURL()
+        try dummyData.write(to: testFile)
+        dataSource = try dataSourceMaker(data)
+        try dataSource.write(to: testFile, inResourceFork: true, atomically: atomic)
+        XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
+        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+
+        do {
+            testFile = try generateTestFileURL()
+            try dummyData.write(to: testFile)
+            let descriptor = try FileDescriptor.open(FilePath(testFile.path), .readWrite)
+            defer { _ = try? descriptor.close() }
+
+            dataSource = try dataSourceMaker(data)
+            try dataSource.write(to: descriptor)
+            XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+        }
+        
+        do {
+            testFile = try generateTestFileURL()
+            try dummyData.write(to: testFile)
+            let fd = open(testFile.path, O_RDWR)
+            defer { close(fd) }
+
+            dataSource = try dataSourceMaker(data)
+            try dataSource.write(toFileDescriptor: fd)
+            XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+        }
+    }
 
     func testData() {
         self.testDataSource { CSDataSource($0) }
@@ -241,14 +332,14 @@ final class CSDataSourceTests: XCTestCase {
             let rsrcURL = url.appending(path: "..namedfork/rsrc")
             try Data($0).write(to: rsrcURL)
 
-            return try CSDataSource(path: url.path, isResourceFork: true)
+            return try CSDataSource(path: url.path, inResourceFork: true)
         }
 
         try self.testDataSource {
             let rsrcURL = url.appending(path: "..namedfork/rsrc")
             try Data($0).write(to: rsrcURL)
 
-            return try CSDataSource(path: FilePath(url.path), isResourceFork: true)
+            return try CSDataSource(path: FilePath(url.path), inResourceFork: true)
         }
     }
 
@@ -258,16 +349,131 @@ final class CSDataSourceTests: XCTestCase {
 
         try self.testDataSource {
             try Data($0[3...]).write(to: url)
-            var dataSource = try CSDataSource(url: url)
+            let dataSource = try CSDataSource(url: url)
             dataSource.replaceSubrange(0..<0, with: $0[..<3])
             return dataSource
         }
 
         try self.testDataSource {
             try Data([$0[0]] + $0[4...]).write(to: url)
-            var dataSource = try CSDataSource(url: url)
+            let dataSource = try CSDataSource(url: url)
             dataSource.replaceSubrange(1..<1, with: $0[1..<4])
             return dataSource
+        }
+    }
+
+    func testWriteInPlace() throws {
+        for eachVersion in [10, 11, .max] {
+            try emulateOSVersion(eachVersion) {
+                let tempURL = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+                try "0000000000000000000000000000".data(using: .utf8)!.write(to: tempURL)
+                defer { _ = try? FileManager.default.removeItem(at: tempURL) }
+
+                let desc = try FileDescriptor.open(FilePath(tempURL.path), .readWrite)
+                defer { _ = try? desc.close() }
+
+                let writeFuncs: [(CSDataSource) throws -> Void] = [
+                    { try $0.write(to: tempURL) }
+//                    { try $0.write(to: FilePath(tempURL.path)) },
+//                    { try $0.write(toPath: tempURL.path) },
+//                    {
+//                        try desc.seek(offset: 0, from: .start)
+//                        try $0.write(to: desc, truncateFile: true)
+//                    },
+//                    {
+//                        try desc.seek(offset: 0, from: .start)
+//                        try $0.write(toFileDescriptor: desc.rawValue, truncateFile: true)
+//                    }
+                ]
+
+                for writeFunc in writeFuncs {
+                    try desc.seek(offset: 0, from: .start)
+
+                    let initialData = "initial test data".data(using: .utf8)!
+
+                    let dataSource = CSDataSource(initialData)
+                    try writeFunc(dataSource)
+
+                    switch dataSource.backing {
+                    case .file(let backing):
+                        let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
+                        XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
+                    default:
+                        XCTFail("data source backing not switched to file")
+                    }
+
+                    XCTAssertEqual(try String(contentsOf: tempURL, encoding: .utf8), "initial test data")
+
+                    dataSource.replaceSubrange(dataSource.size..<dataSource.size, with: " appended data".data(using: .utf8)!)
+                    try writeFunc(dataSource)
+                    XCTAssertEqual(try String(contentsOf: tempURL, encoding: .utf8), "initial test data appended data")
+
+                    dataSource.replaceSubrange(0..<0, with: "prepended data ".data(using: .utf8)!)
+                    try writeFunc(dataSource)
+                    XCTAssertEqual(
+                        try String(contentsOf: tempURL, encoding: .utf8),
+                        "prepended data initial test data appended data"
+                    )
+
+                    dataSource.replaceSubrange(3..<7, with: "mangl".data(using: .utf8)!)
+                    dataSource.replaceSubrange(16..<24, with: [])
+                    dataSource.replaceSubrange(dataSource.size..<dataSource.size, with: " end".data(using: .utf8)!)
+                    try writeFunc(dataSource)
+                    XCTAssertEqual(
+                        try String(contentsOf: tempURL, encoding: .utf8),
+                        "premangled data test data appended data end"
+                    )
+                }
+            }
+        }
+    }
+
+    func testWriteWithoutTruncating() throws {
+        for eachVersion in [10, 11, .max] {
+            try emulateOSVersion(eachVersion) {
+                let writeFuncs: [(CSDataSource, FileDescriptor) throws -> Void] = [
+                    { try $0.write(to: $1, truncateFile: false) },
+                    { try $0.write(toFileDescriptor: $1.rawValue, truncateFile: false) }
+                ]
+
+                for writeFunc in writeFuncs {
+                    let tempURL = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+                    try "0000000000000000000000000000".data(using: .utf8)!.write(to: tempURL)
+                    defer { _ = try? FileManager.default.removeItem(at: tempURL) }
+
+                    let desc = try FileDescriptor.open(FilePath(tempURL.path), .readWrite)
+                    defer { _ = try? desc.close() }
+
+                    let initialData = "initial test data".data(using: .utf8)!
+
+                    let dataSource = CSDataSource(initialData)
+                    try writeFunc(dataSource, desc)
+
+                    switch dataSource.backing {
+                    case .file(let backing):
+                        let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
+                        XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
+                    default:
+                        XCTFail("data source backing not switched to file")
+                    }
+
+                    XCTAssertEqual(try String(contentsOf: tempURL, encoding: .utf8), "initial test data00000000000")
+
+                    dataSource.replaceSubrange(dataSource.size..<dataSource.size, with: " appended data".data(using: .utf8)!)
+                    try desc.seek(offset: 0, from: .start)
+                    try writeFunc(dataSource, desc)
+                    XCTAssertEqual(
+                        try String(contentsOf: tempURL, encoding: .utf8),
+                        "initial test data00000000000 appended data"
+                    )
+
+                    try writeFunc(dataSource, desc)
+                    XCTAssertEqual(
+                        try String(contentsOf: tempURL, encoding: .utf8),
+                        "initial test data00000000000 appended datainitial test data00000000000 appended data"
+                    )
+                }
+            }
         }
     }
 
@@ -276,14 +482,14 @@ final class CSDataSourceTests: XCTestCase {
 
         for eachVersion in [10, 11, 12, 13] {
             try emulateOSVersion(eachVersion) {
-                XCTAssertThrowsError(try CSDataSource(path: FilePath("/dev/null"), isResourceFork: true)) {
-                    XCTAssertEqual($0 as? Errno, .notPermitted)
+                XCTAssertThrowsError(try CSDataSource(path: FilePath("/dev/null"), inResourceFork: true)) {
+                    XCTAssertTrue($0.isPermissionError)
                 }
                 
                 XCTAssertEqual(try self.getOpenFileDescriptors(), initialDescriptors)
                 
-                XCTAssertThrowsError(try CSDataSource(path: String("/dev/null"), isResourceFork: true)) {
-                    XCTAssertEqual($0 as? Errno, .notPermitted)
+                XCTAssertThrowsError(try CSDataSource(path: String("/dev/null"), inResourceFork: true)) {
+                    XCTAssertTrue($0.isPermissionError)
                 }
                 
                 XCTAssertEqual(try self.getOpenFileDescriptors(), initialDescriptors)
@@ -329,7 +535,7 @@ final class CSDataSourceTests: XCTestCase {
             CSDataSource(fileDescriptor: FileDescriptor.open(url.path, .readOnly).rawValue, closeWhenDone: false)
         )
         try testClosingTwice(try {
-            var dataSource = try CSDataSource(url: url)
+            let dataSource = try CSDataSource(url: url)
             dataSource.replaceSubrange(0..<3, with: [1, 2, 3])
             return dataSource
         }())

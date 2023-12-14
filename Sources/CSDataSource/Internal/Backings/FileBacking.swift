@@ -16,13 +16,37 @@ import Glibc
 #endif
 
 class FileBacking {
-    private enum Descriptor {
+    internal enum Descriptor {
         case fileDescriptor(Any)
         case legacy(Int32)
         case resourceFork(Int32)
+
+        var fd: Int32 {
+            switch self {
+            case .fileDescriptor(let descriptor):
+                guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *) else {
+                    fatalError("Should be unreachable")
+                }
+
+                return (descriptor as! FileDescriptor).rawValue
+            case .legacy(let descriptor):
+                return descriptor
+            case .resourceFork(let descriptor):
+                return descriptor
+            }
+        }
+
+        var isResourceFork: Bool {
+            switch self {
+            case .fileDescriptor, .legacy:
+                return false
+            case .resourceFork:
+                return true
+            }
+        }
     }
 
-    private let descriptor: Descriptor
+    internal let descriptor: Descriptor
     private var isClosed = false
     var range: Range<UInt64>
     var size: UInt64 { UInt64(self.range.count) }
@@ -62,6 +86,26 @@ class FileBacking {
     private init(descriptor: Descriptor, range: Range<UInt64>) {
         self.descriptor = descriptor
         self.range = range
+    }
+
+    private var fileInfo: stat {
+        get throws {
+            if self.isClosed { throw errno(EBADF) }
+            return try callPOSIXFunction(expect: .zero) { fstat(self.descriptor.fd, $0) }
+        }
+    }
+
+    func referencesSameFile(asFileDescriptor fd: Int32, resourceFork: Bool) throws -> Bool {
+        try self.referencesSameFile(statInfo: callPOSIXFunction(expect: .zero) { fstat(fd, $0) }, resourceFork: resourceFork)
+    }
+
+    private func referencesSameFile(statInfo: stat, resourceFork: Bool) throws -> Bool {
+        if resourceFork != self.descriptor.isResourceFork {
+            return false
+        }
+
+        let fileInfo = try self.fileInfo
+        return fileInfo.st_dev == statInfo.st_dev && fileInfo.st_ino == statInfo.st_ino
     }
 
     func getBytes(_ bytes: UnsafeMutableBufferPointer<UInt8>, in range: Range<UInt64>) throws -> Int {
@@ -104,18 +148,22 @@ class FileBacking {
         return FileBacking(descriptor: self.descriptor, range: lowerBound..<upperBound)
     }
 
-    func closeFile() throws {
+    func closeFile(hasClosedFile: inout Bool) throws {
         if self.isClosed { return }
 
-        switch self.descriptor {
-        case .fileDescriptor(let descriptor):
-            if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *) {
-                try (descriptor as! FileDescriptor).close()
+        if !hasClosedFile {
+            switch self.descriptor {
+            case .fileDescriptor(let descriptor):
+                if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *) {
+                    try (descriptor as! FileDescriptor).close()
+                }
+            case .legacy(let fd):
+                try callPOSIXFunction(expect: .zero) { close(fd) }
+            case .resourceFork(let fd):
+                try callPOSIXFunction(expect: .zero) { close(fd) }
             }
-        case .legacy(let fd):
-            try callPOSIXFunction(expect: .zero) { close(fd) }
-        case .resourceFork(let fd):
-            try callPOSIXFunction(expect: .zero) { close(fd) }
+
+            hasClosedFile = true
         }
 
         self.isClosed = true

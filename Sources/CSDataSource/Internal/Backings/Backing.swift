@@ -8,17 +8,18 @@
 
 import CSDataProtocol
 import CSErrors
+import CSFileManager
 import System
 
 #if canImport(Darwin)
 import Darwin
+private let systemWrite = Darwin.write
 #else
 import Glibc
+private let systemWrite = Glibc.write
 #endif
 
 extension CSDataSource {
-    private static let maxWriteAtOnce = 0x100000
-
     enum Backing {
         case data(DataBacking)
         case file(FileBacking)
@@ -101,6 +102,36 @@ extension CSDataSource {
             }
         }
 
+        @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+        func referencesSameFile(as fileDescriptor: FileDescriptor, resourceFork: Bool) throws -> Bool {
+            guard let fileBacking = self.firstFileBacking() else { return false }
+
+            return try fileBacking.referencesSameFile(asFileDescriptor: fileDescriptor.rawValue, resourceFork: resourceFork)
+        }
+        
+        func referencesSameFile(asFileDescriptor fd: Int32, resourceFork: Bool) throws -> Bool {
+            guard let fileBacking = self.firstFileBacking() else { return false }
+
+            return try fileBacking.referencesSameFile(asFileDescriptor: fd, resourceFork: resourceFork)
+        }
+
+        internal func firstFileBacking() -> FileBacking? {
+            switch self {
+            case .data:
+                return nil
+            case .file(let backing):
+                return backing
+            case .composite(let backings):
+                for eachBacking in backings {
+                    if case .file(let backing) = eachBacking {
+                        return backing
+                    }
+                }
+
+                return nil
+            }
+        }
+
         func data(in range: some RangeExpression<UInt64>) throws -> ContiguousArray<UInt8> {
             let count = range.relative(to: self).count
 
@@ -109,6 +140,261 @@ extension CSDataSource {
             return try ContiguousArray<UInt8>(unsafeUninitializedCapacity: count) { buf, outCount in
                 outCount = try self.getBytes(buf, in: range)
             }
+        }
+
+        @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+        func writeFromScratch(to fileDescriptor: FileDescriptor, inResourceFork: Bool = false, truncate: Bool) throws {
+            if inResourceFork {
+                let wrapper = ResourceForkFileDescriptorWrapper(fd: fileDescriptor.rawValue)
+                wrapper.removeResourceForkIfPresent()
+
+                try self.enumerateData {
+                    try $0.withUnsafeBytes {
+                        _ = try wrapper.write($0)
+                    }
+                }
+            } else {
+                try self.enumerateData { try fileDescriptor.writeAll($0) }
+                let endingOffset = try fileDescriptor.seek(offset: 0, from: .current)
+
+                if truncate {
+                    try callPOSIXFunction(expect: .zero) { ftruncate(fileDescriptor.rawValue, endingOffset) }
+                }
+            }
+        }
+
+        func writeFromScratch(to fd: Int32, inResourceFork: Bool = false, truncate: Bool) throws {
+            if inResourceFork {
+                let wrapper = ResourceForkFileDescriptorWrapper(fd: fd)
+                wrapper.removeResourceForkIfPresent()
+
+                try self.enumerateData {
+                    try $0.withUnsafeBytes {
+                        _ = try wrapper.write($0)
+                    }
+                }
+                return
+            }
+
+            try self.enumerateData {
+                try $0.withUnsafeBytes { bytes in
+                    _ = try callPOSIXFunction(expect: .nonNegative) { systemWrite(fd, bytes.baseAddress, bytes.count) }
+                }
+            }
+
+            let length = try callPOSIXFunction(expect: .nonNegative) { lseek(fd, 0, SEEK_CUR) }
+
+            if truncate {
+                try callPOSIXFunction(expect: .zero) { ftruncate(fd, length) }
+            }
+        }
+
+        private func enumerateData(closure: (ContiguousArray<UInt8>) throws -> ()) throws {
+            switch self {
+            case .data(let backing):
+                try closure(backing.data)
+            case .file(let backing):
+                let bufferSize = 1024 * 1024 * 1024
+                let size = backing.size
+
+                for index in stride(from: 0, to: size, by: bufferSize) {
+                    try closure(self.data(in: index..<Swift.min(index + UInt64(bufferSize), size)))
+                }
+            case .composite(let backings):
+                for eachBacking in backings {
+                    try eachBacking.enumerateData(closure: closure)
+                }
+            }
+        }
+
+        @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+        func writeInPlace(to fileDescriptor: FileDescriptor, truncate: Bool) throws {
+            try self.writeInPlace(to: SystemFileDescriptorWrapper(file: fileDescriptor), truncate: truncate)
+        }
+
+        @available(macOS, obsoleted: 11.0)
+        @available(iOS, obsoleted: 14.0)
+        @available(tvOS, obsoleted: 14.0)
+        @available(watchOS, obsoleted: 7.0)
+        @available(macCatalyst, obsoleted: 14.0)
+        @available(visionOS, unavailable)
+ 
+        func writeInPlace(to fd: Int32, truncate: Bool) throws {
+            try self.writeInPlace(to: POSIXFileDescriptorWrapper(file: fd), truncate: truncate)
+        }
+
+        private func writeInPlace<File: FileDescriptorWrapper>(to file: File, truncate: Bool) throws {
+            let startingOffset = try file.seek(to: 0, fromCurrent: true)
+            let plan = try self.planForWritingInPlace(startingOffset: startingOffset)
+
+            let (scratchFile, scratchPath) = try self.writeScratchFile(file: file, plan: plan)
+
+            defer {
+                _ = try? scratchFile?.close()
+
+                if let scratchPath {
+                    _ = try? File.ScratchFile.delete(path: scratchPath)
+                }
+            }
+
+            _ = try file.seek(to: Int64(startingOffset), fromCurrent: false)
+            try self.doWriteInPlace(file: file, scratchFile: scratchFile, plan: plan)
+
+            if truncate {
+                try file.truncate(length: file.seek(to: 0, fromCurrent: true))
+            }
+        }
+
+        private func writeScratchFile<File: FileDescriptorWrapper>(
+            file: File,
+            plan: some Sequence<WriteInPlacePlanItem>
+        ) throws -> (File.ScratchFile?, File.ScratchFile.Path?) {
+            let scratchRanges = plan.compactMap {
+                switch $0 {
+                case .toScratch(let range):
+                    range
+                default:
+                    nil
+                }
+            }
+
+            guard !scratchRanges.isEmpty else { return (nil, nil) }
+
+            let (scratchFile, scratchPath) = try File.makeTemp()
+
+            for eachRange in scratchRanges {
+                _ = try file.seek(to: Int64(eachRange.lowerBound), fromCurrent: false)
+                try file.read(length: eachRange.upperBound - eachRange.lowerBound) { try scratchFile.write($0) }
+            }
+
+            _ = try scratchFile.seek(to: 0, fromCurrent: false)
+            return (scratchFile, scratchPath)
+        }
+
+        private func doWriteInPlace(
+            file: some FileDescriptorWrapper,
+            scratchFile: (some FileDescriptorWrapper)?,
+            plan: some Sequence<WriteInPlacePlanItem>
+        ) throws {
+            for planItem in plan {
+                switch planItem {
+                case .data(let data):
+                    try data.withUnsafeBytes { try file.write($0) }
+                case .skip(let amount):
+                    _ = try file.seek(to: Int64(amount), fromCurrent: true)
+                case .toScratch(let range):
+                    try scratchFile!.read(length: range.upperBound - range.lowerBound) { try file.write($0) }
+                case .inPlace(let range):
+                    var readOffset = range.lowerBound
+                    var writeOffset = try file.seek(to: 0, fromCurrent: true)
+
+                    _ = try file.seek(to: Int64(readOffset), fromCurrent: false)
+
+                    try file.read(length: range.upperBound - range.lowerBound) {
+                        _ = try file.seek(to: Int64(writeOffset), fromCurrent: false)
+                        try file.write($0)
+                        writeOffset = try file.seek(to: 0, fromCurrent: true)
+
+                        readOffset += UInt64($0.count)
+                        _ = try file.seek(to: Int64(readOffset), fromCurrent: false)
+                    }
+
+                    _ = try file.seek(to: Int64(writeOffset), fromCurrent: false)
+                }
+            }
+        }
+
+        private enum WriteInPlacePlanItem {
+            case skip(UInt64)
+            case data(ContiguousArray<UInt8>)
+            case inPlace(Range<UInt64>)
+            case toScratch(Range<UInt64>)
+        }
+        private func planForWritingInPlace(startingOffset: UInt64) throws -> some Collection<WriteInPlacePlanItem> {
+            let affectedRanges = self.getAffectedRanges(targetRange: startingOffset..<(startingOffset + self.size))
+            var targetOffset = startingOffset
+            return try self.planForWritingInPlace(affectedRanges: affectedRanges, targetOffset: &targetOffset)
+        }
+
+        private func getAffectedRanges(targetRange: Range<UInt64>) -> [Range<UInt64>] {
+            switch self {
+            case .data:
+                return [targetRange]
+            case .file(let backing):
+                let targetCount = targetRange.upperBound - targetRange.lowerBound
+                let backingCount = backing.range.upperBound - backing.range.lowerBound
+
+                if targetRange.lowerBound == backing.range.lowerBound && targetCount <= backingCount {
+                    return []
+                }
+
+                return [targetRange]
+            case .composite(let backings):
+                var ranges: [Range<UInt64>] = []
+                var targetSubrangeStart = targetRange.lowerBound
+
+                for backing in backings {
+                    let targetSubrangeEnd = targetSubrangeStart + backing.size
+                    var newRanges = backing.getAffectedRanges(targetRange: targetSubrangeStart..<targetSubrangeEnd)
+
+                    while let prev = ranges.last, let next = newRanges.first, prev.upperBound == next.lowerBound {
+                        ranges.removeLast()
+                        newRanges.removeFirst()
+                        ranges.append(prev.lowerBound..<next.upperBound)
+                    }
+
+                    ranges.append(contentsOf: newRanges)
+                    targetSubrangeStart = targetSubrangeEnd
+                }
+
+                return ranges
+            }
+        }
+
+        private func planForWritingInPlace(
+            affectedRanges: [Range<UInt64>],
+            targetOffset: inout UInt64
+        ) throws -> some Collection<WriteInPlacePlanItem> {
+            switch self {
+            case .data(let backing):
+                targetOffset += UInt64(backing.data.count)
+                return [.data(backing.data)]
+            case .file(let backing):
+                defer { targetOffset += UInt64(backing.range.count) }
+
+                if targetOffset == backing.range.lowerBound {
+                    return [.skip(UInt64(backing.range.count))]
+                }
+
+                return self.sliceFileRange(backing.range, affectedRanges: affectedRanges)
+            case .composite(let backings):
+                return try backings.flatMap {
+                    try $0.planForWritingInPlace(affectedRanges: affectedRanges, targetOffset: &targetOffset)
+                }
+            }
+        }
+
+        private func sliceFileRange(_ range: Range<UInt64>, affectedRanges: [Range<UInt64>]) -> [WriteInPlacePlanItem] {
+            var items: [WriteInPlacePlanItem] = []
+            var remainingRange = range
+
+            for affectedRange in affectedRanges where remainingRange.overlaps(affectedRange) {
+                let intersection = remainingRange.clamped(to: affectedRange)
+
+                if intersection.lowerBound > remainingRange.lowerBound {
+                    items.append(.inPlace(remainingRange.lowerBound..<intersection.lowerBound))
+                }
+
+                items.append(.toScratch(intersection))
+
+                remainingRange = intersection.upperBound..<remainingRange.upperBound
+            }
+
+            if !remainingRange.isEmpty {
+                items.append(.inPlace(remainingRange))
+            }
+
+            return items
         }
 
         private func getBytes(
@@ -157,13 +443,18 @@ extension CSDataSource {
         }
 
         func closeFile() throws {
+            var hasClosedFile = false
+            try self.closeFile(hasClosedFile: &hasClosedFile)
+        }
+
+        private func closeFile(hasClosedFile: inout Bool) throws {
             switch self {
             case .data: break
             case .file(let backing):
-                try backing.closeFile()
+                try backing.closeFile(hasClosedFile: &hasClosedFile)
             case .composite(let backings):
                 for eachBacking in backings {
-                    try eachBacking.closeFile()
+                    try eachBacking.closeFile(hasClosedFile: &hasClosedFile)
                 }
             }
         }
