@@ -93,6 +93,7 @@ final class CSDataSourceTests: XCTestCase {
                 try self.testSave(dataSourceMaker: dataSourceMaker, data: largeTestData, replace: true, atomic: false)
 
                 try self.checkMutations(dataSourceMaker: dataSourceMaker)
+                try self.checkRegisterAndUnregisterNotifications(dataSourceMaker: dataSourceMaker)
             }
         }
     }
@@ -101,49 +102,128 @@ final class CSDataSourceTests: XCTestCase {
         let originalDataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         var dataSource = originalDataSource
 
+        func expectingNotifications(before: Range<UInt64>, after: Range<UInt64>, closure: () -> Void) {
+            let willChangeExpectation = self.expectation(description: "willChangeNotification fired")
+            let didChangeExpectation = self.expectation(description: "didChangeNotification fired")
+
+            dataSource.addWillChangeNotification { source, range in
+                XCTAssertIdentical(source, dataSource)
+                XCTAssertEqual(range, before)
+                willChangeExpectation.fulfill()
+            }
+
+            dataSource.addDidChangeNotification { source, range in
+                XCTAssertIdentical(source, dataSource)
+                XCTAssertEqual(range, after)
+                didChangeExpectation.fulfill()
+            }
+
+            closure()
+            self.wait(for: [willChangeExpectation, didChangeExpectation], timeout: 5.0)
+        }
+
         XCTAssertEqual(dataSource.size, 10)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-        dataSource.replaceSubrange(0..<3, with: [])
+        expectingNotifications(before: 0..<3, after: 0..<0) {
+            dataSource.replaceSubrange(0..<3, with: [])
+        }
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [3, 4, 5, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [3, 4, 5])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
+        expectingNotifications(before: 0..<3, after: 0..<4) {
+            dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
+        }
         XCTAssertEqual(dataSource.size, 11)
         XCTAssertEqual(try Array(dataSource.data), [0x0a, 0x0b, 0x0c, 0x0d, 3, 4, 5, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<5)), [0x0a, 0x0b, 0x0c, 0x0d, 3])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [0x0d, 3, 4])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        dataSource.replaceSubrange(7..<10, with: [])
+        expectingNotifications(before: 7..<10, after: 7..<7) {
+            dataSource.replaceSubrange(7..<10, with: [])
+        }
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [3, 4, 5])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        dataSource.replaceSubrange(3..<6, with: [])
+        expectingNotifications(before: 3..<6, after: 3..<3) {
+            dataSource.replaceSubrange(3..<6, with: [])
+        }
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 2..<6)), [2, 6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
+        expectingNotifications(before: 3..<3, after: 3..<6) {
+            dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
+        }
         XCTAssertEqual(dataSource.size, 13)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 3, 4, 5, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 3])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
+        expectingNotifications(before: 3..<6, after: 3..<6) {
+            dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
+        }
         XCTAssertEqual(dataSource.size, 10)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 0xa, 0xb, 0xc, 6, 7, 8, 9])
         XCTAssertEqual(try Array(dataSource.data(in: 0..<3)), [0, 1, 2])
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 6])
+    }
+
+    private func checkRegisterAndUnregisterNotifications(dataSourceMaker: ([UInt8]) throws -> CSDataSource) throws {
+        let dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        var willChangeRanges: [Range<UInt64>] = []
+        var didChangeRanges: [Range<UInt64>] = []
+
+        let willChangeHandler: CSDataSource.ChangeNotification = {
+            XCTAssertIdentical($0, dataSource)
+            willChangeRanges.append($1)
+        }
+
+        let didChangeHandler: CSDataSource.ChangeNotification = {
+            XCTAssertIdentical($0, dataSource)
+            didChangeRanges.append($1)
+        }
+
+        dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
+
+        XCTAssertEqual(willChangeRanges, [])
+        XCTAssertEqual(didChangeRanges, [])
+
+        let willChangeID = dataSource.addWillChangeNotification(willChangeHandler)
+        let didChangeID = dataSource.addDidChangeNotification(didChangeHandler)
+
+        dataSource.replaceSubrange(3..<6, with: [0xd, 0xe, 0xf])
+
+        XCTAssertEqual(willChangeRanges, [3..<6])
+        XCTAssertEqual(didChangeRanges, [3..<6])
+
+        dataSource.replaceSubrange(2..<5, with: [0x10, 0x11])
+
+        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
+        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4])
+
+        dataSource.removeChangeNotification(willChangeID)
+        dataSource.replaceSubrange(1..<2, with: [0x12, 0x13, 0x14])
+
+        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
+        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
+
+        dataSource.removeChangeNotification(didChangeID)
+        dataSource.replaceSubrange(0..<2, with: [0x15])
+
+        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
+        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
     }
 
     private func testSave(
@@ -373,17 +453,17 @@ final class CSDataSourceTests: XCTestCase {
                 defer { _ = try? desc.close() }
 
                 let writeFuncs: [(CSDataSource) throws -> Void] = [
-                    { try $0.write(to: tempURL) }
-//                    { try $0.write(to: FilePath(tempURL.path)) },
-//                    { try $0.write(toPath: tempURL.path) },
-//                    {
-//                        try desc.seek(offset: 0, from: .start)
-//                        try $0.write(to: desc, truncateFile: true)
-//                    },
-//                    {
-//                        try desc.seek(offset: 0, from: .start)
-//                        try $0.write(toFileDescriptor: desc.rawValue, truncateFile: true)
-//                    }
+                    { try $0.write(to: tempURL) },
+                    { try $0.write(to: FilePath(tempURL.path)) },
+                    { try $0.write(toPath: tempURL.path) },
+                    {
+                        try desc.seek(offset: 0, from: .start)
+                        try $0.write(to: desc, truncateFile: true)
+                    },
+                    {
+                        try desc.seek(offset: 0, from: .start)
+                        try $0.write(toFileDescriptor: desc.rawValue, truncateFile: true)
+                    }
                 ]
 
                 for writeFunc in writeFuncs {

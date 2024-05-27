@@ -70,7 +70,31 @@ public class CSDataSource {
     }
     
     public var size: UInt64 { self.backing.size }
-    
+
+    public typealias ChangeNotification = (_ dataSource: CSDataSource, _ affectedRange: Range<UInt64>) -> Void
+    private(set) var willChangeNotifications: [String : ChangeNotification] = [:]
+    private(set) var didChangeNotifications: [String : ChangeNotification] = [:]
+
+    @discardableResult
+    public func addWillChangeNotification(_ notification: @escaping ChangeNotification) -> Any {
+        let key = self.generateUUID()
+        self.willChangeNotifications[key] = notification
+        return key
+    }
+
+    @discardableResult
+    public func addDidChangeNotification(_ notification: @escaping ChangeNotification) -> Any {
+        let key = self.generateUUID()
+        self.didChangeNotifications[key] = notification
+        return key
+    }
+
+    public func removeChangeNotification(_ id: Any) {
+        guard let key = id as? String else { return }
+        self.willChangeNotifications.removeValue(forKey: key)
+        self.didChangeNotifications.removeValue(forKey: key)
+    }
+
     public subscript(index: UInt64) -> UInt8 { self.backing[index] }
     
     public func data(in range: some RangeExpression<UInt64>) throws -> some DataProtocol {
@@ -99,8 +123,18 @@ public class CSDataSource {
         try self.backing.closeFile()
     }
     
-    public func replaceSubrange(_ range: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
+    public func replaceSubrange(_ r: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
+        let range = r.relative(to: self.backing)
+
+        for eachNotification in self.willChangeNotifications.values {
+            eachNotification(self, range)
+        }
+
         self.backing.replaceSubrange(range, with: bytes)
+
+        for eachNotification in self.didChangeNotifications.values {
+            eachNotification(self, range.startIndex..<(range.startIndex + UInt64(bytes.count)))
+        }
     }
     
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)

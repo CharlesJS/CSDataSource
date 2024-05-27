@@ -459,9 +459,7 @@ extension CSDataSource {
             }
         }
 
-        mutating func replaceSubrange(_ r: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
-            let range = r.relative(to: self)
-
+        mutating func replaceSubrange(_ range: Range<UInt64>, with bytes: some Collection<UInt8>) {
             switch self {
             case .data(var backing):
                 backing.replaceSubrange(range, with: bytes)
@@ -490,7 +488,7 @@ extension CSDataSource {
             }
         }
 
-        mutating func replaceSubrange(
+        private mutating func replaceSubrange(
             _ range: Range<UInt64>,
             inComposite backings: ContiguousArray<Backing>,
             with bytes: some Collection<UInt8>
