@@ -411,34 +411,69 @@ extension CSDataSource {
             case .composite(let backings):
                 assert(bytes.count >= range.count)
 
-                var inputCursor: UInt64 = 0
                 var outputCursor = bytes.baseAddress!
                 var totalBytesWritten = 0
 
-                for eachBacking in backings where inputCursor < range.upperBound && eachBacking.size != 0 {
-                    let eachSize = eachBacking.size
-                    let nextCursor = inputCursor + eachSize
-                    defer { inputCursor = nextCursor }
+                try self.enumerateBackings(backings, range: range) { backing, subrange in
+                    let subBytes = UnsafeMutableBufferPointer(start: outputCursor, count: subrange.count)
 
-                    let clampedRange = range.clamped(to: inputCursor..<nextCursor)
+                    assert(subBytes.baseAddress! + subBytes.count <= bytes.baseAddress! + range.count)
 
-                    if !clampedRange.isEmpty {
-                        let lowerBound = clampedRange.lowerBound - inputCursor
-                        let upperBound = lowerBound + UInt64(clampedRange.count)
-                        let subrange = lowerBound..<upperBound
-                        let subBytes = UnsafeMutableBufferPointer(start: outputCursor, count: subrange.count)
+                    let bytesWritten = try backing.getBytes(subBytes, in: subrange)
+                    assert(bytesWritten == subrange.count)
 
-                        assert(subBytes.baseAddress! + subBytes.count <= bytes.baseAddress! + range.count)
-
-                        let bytesWritten = try eachBacking.getBytes(subBytes, in: subrange)
-                        assert(bytesWritten == subrange.count)
-
-                        totalBytesWritten += bytesWritten
-                        outputCursor += bytesWritten
-                    }
+                    totalBytesWritten += bytesWritten
+                    outputCursor += bytesWritten
                 }
 
                 return totalBytesWritten
+            }
+        }
+
+        func slice(range _range: some RangeExpression<UInt64>) -> Backing {
+            let range = _range.relative(to: self)
+
+            switch self {
+            case .data(let backing):
+                return .data(backing.slice(range: range))
+            case .file(let backing):
+                return .file(backing.slice(range: range))
+            case .composite(let backings):
+                var newBackings: ContiguousArray<Backing> = []
+
+                self.enumerateBackings(backings, range: range) { backing, subrange in
+                    newBackings.append(backing.slice(range: subrange))
+                }
+
+                if newBackings.isEmpty {
+                    return .data(DataBacking(data: []))
+                } else {
+                    return .composite(newBackings)
+                }
+            }
+        }
+
+        private func enumerateBackings(
+            _ backings: some Sequence<Backing>,
+            range: Range<UInt64>,
+            handler: (Backing, Range<UInt64>) throws -> Void
+        ) rethrows {
+            var inputCursor: UInt64 = 0
+
+            for eachBacking in backings where inputCursor < range.upperBound && eachBacking.size != 0 {
+                let eachSize = eachBacking.size
+                let nextCursor = inputCursor + eachSize
+                defer { inputCursor = nextCursor }
+
+                let clampedRange = range.clamped(to: inputCursor..<nextCursor)
+
+                if !clampedRange.isEmpty {
+                    let lowerBound = clampedRange.lowerBound - inputCursor
+                    let upperBound = lowerBound + UInt64(clampedRange.count)
+                    let subrange = lowerBound..<upperBound
+
+                    try handler(eachBacking, subrange)
+                }
             }
         }
 
@@ -464,34 +499,49 @@ extension CSDataSource {
             case .data(var backing):
                 backing.replaceSubrange(range, with: bytes)
                 self = .data(backing)
-            case .file(let backing):
+            default:
+                self.replaceSubrange(range, with: .data(DataBacking(data: bytes)))
+            }
+        }
+
+        mutating func replaceSubrange(_ range: Range<UInt64>, with newBacking: Backing) {
+            switch self {
+            case .data(var backing):
+                if case .data(let otherDataBacking) = newBacking {
+                    backing.replaceSubrange(range, with: otherDataBacking.data)
+                    self = .data(backing)
+                    return
+                }
+
+                fallthrough
+            case .file:
                 let rangeBefore = 0..<range.lowerBound
-                let rangeAfter = range.upperBound..<backing.size
+                let rangeAfter = range.upperBound..<self.size
 
                 var backings: ContiguousArray<Backing> = []
 
                 if !rangeBefore.isEmpty {
-                    backings.append(.file(backing.slice(range: rangeBefore)))
+                    backings.append(self.slice(range: rangeBefore))
                 }
 
-                if !bytes.isEmpty {
-                    backings.append(.data(DataBacking(data: bytes)))
+                if newBacking.size > 0 {
+                    backings.append(newBacking)
                 }
 
                 if !rangeAfter.isEmpty {
-                    backings.append(.file(backing.slice(range: rangeAfter)))
+                    backings.append(self.slice(range: rangeAfter))
                 }
 
                 self.setComposite(backings)
             case .composite(let backings):
-                self.replaceSubrange(range, inComposite: backings, with: bytes)
+                self.replaceSubrange(range, inComposite: backings, with: newBacking)
             }
         }
 
         private mutating func replaceSubrange(
             _ range: Range<UInt64>,
             inComposite backings: ContiguousArray<Backing>,
-            with bytes: some Collection<UInt8>
+            with newBacking: Backing
         ) {
             var prefix: ContiguousArray<Backing> = []
             var suffix: ContiguousArray<Backing> = []
@@ -517,7 +567,7 @@ extension CSDataSource {
                     if alreadyReplaced {
                         newChunk.replaceSubrange(shiftedRange, with: [])
                     } else {
-                        newChunk.replaceSubrange(shiftedRange, with: bytes)
+                        newChunk.replaceSubrange(shiftedRange, with: newBacking)
                         alreadyReplaced = true
                     }
 
@@ -528,7 +578,7 @@ extension CSDataSource {
             var newBackings = prefix
 
             if !alreadyReplaced {
-                newBackings.append(.data(DataBacking(data: bytes)))
+                newBackings.append(newBacking)
             }
 
             newBackings += suffix

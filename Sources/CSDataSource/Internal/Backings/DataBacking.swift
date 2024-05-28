@@ -35,6 +35,12 @@ struct DataBacking {
         self.data[Int(index)]
     }
 
+    func slice(range _range: Range<UInt64>) -> DataBacking {
+        let range = _range.clamped(to: 0..<self.size)
+
+        return DataBacking(data: self.data[Int(range.lowerBound)..<Int(range.upperBound)])
+    }
+
     mutating func replaceSubrange(_ range: Range<UInt64>, with bytes: some Collection<UInt8>) {
         self.data.replaceSubrange(Int(range.lowerBound)..<Int(range.upperBound), with: bytes)
     }

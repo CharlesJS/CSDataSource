@@ -45,4 +45,11 @@ extension CSDataSource {
 
         try self.write(to: FilePath(url.path), inResourceFork: inResourceFork, atomically: atomically)
     }
+
+    public var undoManager: UndoManager? {
+        get { self.undoHandler?.undoManager as? UndoManager }
+        set { self.undoHandler = newValue.map { UndoHandler(undoManager: $0) } }
+    }
 }
+
+extension UndoManager: UndoManagerProtocol {}

@@ -102,30 +102,54 @@ final class CSDataSourceTests: XCTestCase {
         let originalDataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         var dataSource = originalDataSource
 
-        func expectingNotifications(before: Range<UInt64>, after: Range<UInt64>, closure: () -> Void) {
-            let willChangeExpectation = self.expectation(description: "willChangeNotification fired")
-            let didChangeExpectation = self.expectation(description: "didChangeNotification fired")
+        func expectingNotifications(before: Range<UInt64>, after: Range<UInt64>, closure: () -> Void) throws {
+            let undoManager = UndoManager()
+            dataSource.undoManager = undoManager
+            XCTAssertIdentical(dataSource.undoManager, undoManager)
+
+            var willChangeRanges: [Range<UInt64>] = []
+            var didChangeRanges: [Range<UInt64>] = []
 
             dataSource.addWillChangeNotification { source, range in
                 XCTAssertIdentical(source, dataSource)
-                XCTAssertEqual(range, before)
-                willChangeExpectation.fulfill()
+                willChangeRanges.append(range)
             }
 
             dataSource.addDidChangeNotification { source, range in
                 XCTAssertIdentical(source, dataSource)
-                XCTAssertEqual(range, after)
-                didChangeExpectation.fulfill()
+                didChangeRanges.append(range)
             }
 
+            let oldData = Data(try dataSource.data)
+
             closure()
-            self.wait(for: [willChangeExpectation, didChangeExpectation], timeout: 5.0)
+            XCTAssertEqual(willChangeRanges, [before])
+            XCTAssertEqual(didChangeRanges, [after])
+
+            let newData = Data(try dataSource.data)
+
+            XCTAssertNotEqual(oldData, newData)
+
+            undoManager.undo()
+            XCTAssertEqual(willChangeRanges, [before, after])
+            XCTAssertEqual(didChangeRanges, [after, before])
+
+            XCTAssertEqual(Data(try dataSource.data), oldData)
+
+            undoManager.redo()
+            XCTAssertEqual(willChangeRanges, [before, after, before])
+            XCTAssertEqual(didChangeRanges, [after, before, after])
+
+            XCTAssertEqual(Data(try dataSource.data), newData)
+
+            dataSource.undoManager = nil
+            XCTAssertNil(dataSource.undoManager)
         }
 
         XCTAssertEqual(dataSource.size, 10)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-        expectingNotifications(before: 0..<3, after: 0..<0) {
+        try expectingNotifications(before: 0..<3, after: 0..<0) {
             dataSource.replaceSubrange(0..<3, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -134,7 +158,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        expectingNotifications(before: 0..<3, after: 0..<4) {
+        try expectingNotifications(before: 0..<3, after: 0..<4) {
             dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
         }
         XCTAssertEqual(dataSource.size, 11)
@@ -143,7 +167,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [0x0d, 3, 4])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        expectingNotifications(before: 7..<10, after: 7..<7) {
+        try expectingNotifications(before: 7..<10, after: 7..<7) {
             dataSource.replaceSubrange(7..<10, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -152,7 +176,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [3, 4, 5])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        expectingNotifications(before: 3..<6, after: 3..<3) {
+        try expectingNotifications(before: 3..<6, after: 3..<3) {
             dataSource.replaceSubrange(3..<6, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -161,7 +185,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 2..<6)), [2, 6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        expectingNotifications(before: 3..<3, after: 3..<6) {
+        try expectingNotifications(before: 3..<3, after: 3..<6) {
             dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
         }
         XCTAssertEqual(dataSource.size, 13)
@@ -170,7 +194,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 3])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        expectingNotifications(before: 3..<6, after: 3..<6) {
+        try expectingNotifications(before: 3..<6, after: 3..<6) {
             dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
         }
         XCTAssertEqual(dataSource.size, 10)

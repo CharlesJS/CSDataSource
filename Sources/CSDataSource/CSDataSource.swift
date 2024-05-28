@@ -71,6 +71,8 @@ public class CSDataSource {
     
     public var size: UInt64 { self.backing.size }
 
+    package var undoHandler: UndoHandler? = nil
+
     public typealias ChangeNotification = (_ dataSource: CSDataSource, _ affectedRange: Range<UInt64>) -> Void
     private(set) var willChangeNotifications: [String : ChangeNotification] = [:]
     private(set) var didChangeNotifications: [String : ChangeNotification] = [:]
@@ -130,13 +132,34 @@ public class CSDataSource {
             eachNotification(self, range)
         }
 
+        self.undoHandler?.addToUndoStack(dataSource: self, range: range, replacementLength: UInt64(bytes.count))
         self.backing.replaceSubrange(range, with: bytes)
 
         for eachNotification in self.didChangeNotifications.values {
             eachNotification(self, range.startIndex..<(range.startIndex + UInt64(bytes.count)))
         }
     }
-    
+
+    func replaceSubrange(_ range: Range<UInt64>, with backing: Backing, isUndo: Bool) {
+        for eachNotification in self.willChangeNotifications.values {
+            eachNotification(self, range)
+        }
+
+        if let undoHandler = self.undoHandler {
+            if isUndo {
+                undoHandler.addToRedoStack(dataSource: self, range: range, replacementLength: backing.size)
+            } else {
+                undoHandler.addToUndoStack(dataSource: self, range: range, replacementLength: backing.size)
+            }
+        }
+
+        self.backing.replaceSubrange(range, with: backing)
+
+        for eachNotification in self.didChangeNotifications.values {
+            eachNotification(self, range.startIndex..<(range.startIndex + UInt64(backing.size)))
+        }
+    }
+
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public func write(to path: FilePath, inResourceFork: Bool = false, atomically: Bool = false) throws {
         if atomically {
