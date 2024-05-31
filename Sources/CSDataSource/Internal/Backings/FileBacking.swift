@@ -95,12 +95,12 @@ class FileBacking {
         }
     }
 
-    func referencesSameFile(asFileDescriptor fd: Int32, resourceFork: Bool) throws -> Bool {
+    func referencesSameFile(asFileDescriptor fd: Int32, resourceFork: Bool?) throws -> Bool {
         try self.referencesSameFile(statInfo: callPOSIXFunction(expect: .zero) { fstat(fd, $0) }, resourceFork: resourceFork)
     }
 
-    private func referencesSameFile(statInfo: stat, resourceFork: Bool) throws -> Bool {
-        if resourceFork != self.descriptor.isResourceFork {
+    private func referencesSameFile(statInfo: stat, resourceFork: Bool?) throws -> Bool {
+        if let resourceFork, resourceFork != self.descriptor.isResourceFork {
             return false
         }
 

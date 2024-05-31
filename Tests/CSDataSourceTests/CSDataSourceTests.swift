@@ -94,6 +94,7 @@ final class CSDataSourceTests: XCTestCase {
 
                 try self.checkMutations(dataSourceMaker: dataSourceMaker)
                 try self.checkRegisterAndUnregisterNotifications(dataSourceMaker: dataSourceMaker)
+                try self.checkMultipleUndo(dataSourceMaker: dataSourceMaker)
             }
         }
     }
@@ -248,6 +249,110 @@ final class CSDataSourceTests: XCTestCase {
 
         XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
         XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
+    }
+
+    private func checkMultipleUndo(dataSourceMaker: ([UInt8]) throws -> CSDataSource) throws {
+        let dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        let undoManager = UndoManager()
+        undoManager.groupsByEvent = false
+        dataSource.undoManager = undoManager
+
+        XCTAssertEqual(dataSource.size, 10)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(0..<3, with: [])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [3, 4, 5, 6, 7, 8, 9])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(0..<3, with: [0xa, 0xb, 0xc, 0xd])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 8)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8, 9])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(7..<8, with: [])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(3..<6, with: [])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 4)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 8])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xa, 0xb, 0xc, 8])
+
+        undoManager.beginUndoGrouping()
+        dataSource.replaceSubrange(3..<6, with: [0xd, 0xe, 0xf])
+        undoManager.endUndoGrouping()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 8])
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xa, 0xb, 0xc, 8])
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 4)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 8])
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8])
+
+        // Test that file backings in the undo stack are converted to data on save
+        if let fileBacking = dataSource.backing.firstFileBacking() {
+            let fd = fileBacking.descriptor.fd
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            _ = fcntl(fd, F_GETPATH, &buffer)
+
+            try dataSource.write(toPath: String(cString: buffer))
+        }
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 8)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8, 9])
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [3, 4, 5, 6, 7, 8, 9])
+
+        undoManager.undo()
+        XCTAssertEqual(dataSource.size, 10)
+        XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [3, 4, 5, 6, 7, 8, 9])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 8)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8, 9])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 4)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 8])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xa, 0xb, 0xc, 8])
+
+        undoManager.redo()
+        XCTAssertEqual(dataSource.size, 7)
+        XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 8])
     }
 
     private func testSave(

@@ -162,6 +162,10 @@ public class CSDataSource {
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public func write(to path: FilePath, inResourceFork: Bool = false, atomically: Bool = false) throws {
+        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(as: path) {
+            try undoHandler.convertToData()
+        }
+
         if atomically {
             let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectory(for: path)
             defer { _ = try? CSFileManager.shared.removeItem(at: itemReplacementDir, recursively: true) }
@@ -218,6 +222,10 @@ public class CSDataSource {
     }
     
     public func write(toPath path: String, inResourceFork: Bool = false, atomically: Bool = false) throws {
+        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(asPath: path) {
+            try undoHandler.convertToData()
+        }
+
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
             if atomically {
                 let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectoryWithStringPath(forPath: path)
@@ -281,6 +289,10 @@ public class CSDataSource {
         truncateFile: Bool = false,
         closeWhenDone: Bool = false
     ) throws {
+        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(as: fileDescriptor) {
+            try undoHandler.convertToData()
+        }
+
         if !inResourceFork, try self.backing.referencesSameFile(as: fileDescriptor, resourceFork: false) {
             try self.backing.writeInPlace(to: fileDescriptor, truncate: truncateFile)
         } else {
@@ -301,6 +313,10 @@ public class CSDataSource {
         truncateFile: Bool = false,
         closeWhenDone: Bool = false
     ) throws {
+        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(asFileDescriptor: fd) {
+            try undoHandler.convertToData()
+        }
+
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
             if !inResourceFork, try self.backing.referencesSameFile(asFileDescriptor: fd, resourceFork: false) {
                 try self.backing.writeInPlace(to: fd, truncate: truncateFile)
