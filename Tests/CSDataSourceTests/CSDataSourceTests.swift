@@ -390,6 +390,7 @@ final class CSDataSourceTests: XCTestCase {
 
         var testFile = try generateTestFileURL()
         var dataSource = try dataSourceMaker(data)
+        dataSource.undoManager = UndoManager()
         try expectWriteNotification(dataSource, testFile) {
             try dataSource.write(to: FilePath(testFile.path), inResourceFork: false, atomically: atomic)
         }

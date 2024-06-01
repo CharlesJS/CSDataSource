@@ -104,7 +104,13 @@ extension CSDataSource {
 
         @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
         func referencesSameFile(as path: FilePath, resourceFork: Bool? = nil) throws -> Bool {
-            let fileDescriptor = try FileDescriptor.open(path, .readOnly)
+            let fileDescriptor: FileDescriptor
+            do {
+                fileDescriptor = try FileDescriptor.open(path, .readOnly)
+            } catch {
+                return false
+            }
+
             defer { _ = try? fileDescriptor.close() }
 
             return try self.referencesSameFile(as: fileDescriptor, resourceFork: resourceFork)
@@ -112,6 +118,11 @@ extension CSDataSource {
 
         func referencesSameFile(asPath path: String, resourceFork: Bool? = nil) throws -> Bool {
             let fd = open(path, O_RDONLY)
+
+            if fd < 0 {
+                return false
+            }
+
             defer { close(fd) }
 
             return try self.referencesSameFile(asFileDescriptor: fd, resourceFork: resourceFork)
