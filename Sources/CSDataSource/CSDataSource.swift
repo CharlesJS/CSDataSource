@@ -157,22 +157,16 @@ public class CSDataSource {
     public func replaceSubrange(_ r: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
         let range = r.relative(to: self.backing)
 
-        for eachNotification in self.willChangeNotifications.values {
-            eachNotification(self, range)
-        }
+        self.sendWillChangeNotifications(range: range)
 
         self.undoHandler?.addToUndoStack(dataSource: self, range: range, replacementLength: UInt64(bytes.count))
         self.backing.replaceSubrange(range, with: bytes)
 
-        for eachNotification in self.didChangeNotifications.values {
-            eachNotification(self, range.startIndex..<(range.startIndex + UInt64(bytes.count)))
-        }
+        self.sendDidChangeNotifications(range: range.startIndex..<(range.startIndex + UInt64(bytes.count)))
     }
 
     func replaceSubrange(_ range: Range<UInt64>, with backing: Backing, isUndo: Bool) {
-        for eachNotification in self.willChangeNotifications.values {
-            eachNotification(self, range)
-        }
+        self.sendWillChangeNotifications(range: range)
 
         if let undoHandler = self.undoHandler {
             if isUndo {
@@ -184,9 +178,7 @@ public class CSDataSource {
 
         self.backing.replaceSubrange(range, with: backing)
 
-        for eachNotification in self.didChangeNotifications.values {
-            eachNotification(self, range.startIndex..<(range.startIndex + UInt64(backing.size)))
-        }
+        self.sendDidChangeNotifications(range: range.startIndex..<(range.startIndex + UInt64(backing.size)))
     }
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
