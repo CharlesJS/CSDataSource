@@ -238,13 +238,13 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
         XCTAssertEqual(didChangeRanges, [3..<6, 2..<4])
 
-        dataSource.removeChangeNotification(willChangeID)
+        dataSource.removeNotification(willChangeID)
         dataSource.replaceSubrange(1..<2, with: [0x12, 0x13, 0x14])
 
         XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
         XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
 
-        dataSource.removeChangeNotification(didChangeID)
+        dataSource.removeNotification(didChangeID)
         dataSource.replaceSubrange(0..<2, with: [0x15])
 
         XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
@@ -375,19 +375,38 @@ final class CSDataSourceTests: XCTestCase {
             return url
         }
 
+        func expectWriteNotification(_ dataSource: CSDataSource, _ url: URL?, closure: () throws -> Void) rethrows {
+            let expectation = self.expectation(description: "Did Write notification is sent")
+            let notificationID = dataSource.addDidWriteNotification {
+                XCTAssertIdentical($0, dataSource)
+                XCTAssertEqual($1, url?.path)
+                expectation.fulfill()
+            }
+
+            try closure()
+            self.wait(for: [expectation], timeout: 0.001)
+            dataSource.removeNotification(notificationID)
+        }
+
         var testFile = try generateTestFileURL()
         var dataSource = try dataSourceMaker(data)
-        try dataSource.write(to: FilePath(testFile.path), inResourceFork: false, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(to: FilePath(testFile.path), inResourceFork: false, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
 
         testFile = try generateTestFileURL()
         dataSource = try dataSourceMaker(data)
-        try dataSource.write(toPath: testFile.path, inResourceFork: false, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(toPath: testFile.path, inResourceFork: false, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
         
         testFile = try generateTestFileURL()
         dataSource = try dataSourceMaker(data)
-        try dataSource.write(to: testFile, inResourceFork: false, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(to: testFile, inResourceFork: false, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
 
         let dummyData = "foo bar baz".data(using: .utf8)!
@@ -395,21 +414,27 @@ final class CSDataSourceTests: XCTestCase {
         testFile = try generateTestFileURL()
         try dummyData.write(to: testFile)
         dataSource = try dataSourceMaker(data)
-        try dataSource.write(to: FilePath(testFile.path), inResourceFork: true, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(to: FilePath(testFile.path), inResourceFork: true, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
         XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
 
         testFile = try generateTestFileURL()
         try dummyData.write(to: testFile)
         dataSource = try dataSourceMaker(data)
-        try dataSource.write(toPath: testFile.path, inResourceFork: true, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(toPath: testFile.path, inResourceFork: true, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
         XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
 
         testFile = try generateTestFileURL()
         try dummyData.write(to: testFile)
         dataSource = try dataSourceMaker(data)
-        try dataSource.write(to: testFile, inResourceFork: true, atomically: atomic)
+        try expectWriteNotification(dataSource, testFile) {
+            try dataSource.write(to: testFile, inResourceFork: true, atomically: atomic)
+        }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
         XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
 
@@ -420,7 +445,9 @@ final class CSDataSourceTests: XCTestCase {
             defer { _ = try? descriptor.close() }
 
             dataSource = try dataSourceMaker(data)
-            try dataSource.write(to: descriptor)
+            try expectWriteNotification(dataSource, nil) {
+                try dataSource.write(to: descriptor)
+            }
             XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
         }
         
@@ -431,7 +458,9 @@ final class CSDataSourceTests: XCTestCase {
             defer { close(fd) }
 
             dataSource = try dataSourceMaker(data)
-            try dataSource.write(toFileDescriptor: fd)
+            try expectWriteNotification(dataSource, nil) {
+                try dataSource.write(toFileDescriptor: fd)
+            }
             XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
         }
     }

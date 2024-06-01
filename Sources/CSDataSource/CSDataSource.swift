@@ -77,6 +77,27 @@ public class CSDataSource {
     private(set) var willChangeNotifications: [String : ChangeNotification] = [:]
     private(set) var didChangeNotifications: [String : ChangeNotification] = [:]
 
+    public typealias WriteNotification = (_ dataSource: CSDataSource, _ path: String?) -> Void
+    private(set) var didWriteNotifications: [String : WriteNotification] = [:]
+
+    private func sendWillChangeNotifications(range: Range<UInt64>) {
+        for eachNotification in self.willChangeNotifications.values {
+            eachNotification(self, range)
+        }
+    }
+
+    private func sendDidChangeNotifications(range: Range<UInt64>) {
+        for eachNotification in self.didChangeNotifications.values {
+            eachNotification(self, range)
+        }
+    }
+
+    private func sendDidWriteNotifications(path: String?) {
+        for eachNotification in self.didWriteNotifications.values {
+            eachNotification(self, path)
+        }
+    }
+
     @discardableResult
     public func addWillChangeNotification(_ notification: @escaping ChangeNotification) -> Any {
         let key = self.generateUUID()
@@ -91,10 +112,18 @@ public class CSDataSource {
         return key
     }
 
-    public func removeChangeNotification(_ id: Any) {
+    @discardableResult
+    public func addDidWriteNotification(_ notification: @escaping WriteNotification) -> Any {
+        let key = self.generateUUID()
+        self.didWriteNotifications[key] = notification
+        return key
+    }
+
+    public func removeNotification(_ id: Any) {
         guard let key = id as? String else { return }
         self.willChangeNotifications.removeValue(forKey: key)
         self.didChangeNotifications.removeValue(forKey: key)
+        self.didWriteNotifications.removeValue(forKey: key)
     }
 
     public subscript(index: UInt64) -> UInt8 { self.backing[index] }
@@ -166,6 +195,17 @@ public class CSDataSource {
             try undoHandler.convertToData()
         }
 
+        try self._write(to: path, inResourceFork: inResourceFork, atomically: atomically)
+
+        if #available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, macCatalyst 15.0, *) {
+            self.sendDidWriteNotifications(path: path.string)
+        } else {
+            self.sendDidWriteNotifications(path: String(describing: path))
+        }
+    }
+
+    @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+    private func _write(to path: FilePath, inResourceFork: Bool = false, atomically: Bool = false) throws {
         if atomically {
             let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectory(for: path)
             defer { _ = try? CSFileManager.shared.removeItem(at: itemReplacementDir, recursively: true) }
@@ -206,7 +246,7 @@ public class CSDataSource {
 
             do {
                 try fileDescriptor.seek(offset: 0, from: .start)
-                try self.write(to: fileDescriptor, inResourceFork: inResourceFork, truncateFile: true)
+                try self._write(to: fileDescriptor, inResourceFork: inResourceFork, truncateFile: true)
 
                 if self.closeWhenDone {
                     _ = try? self.backing.closeFile()
@@ -226,6 +266,12 @@ public class CSDataSource {
             try undoHandler.convertToData()
         }
 
+        try self._write(toPath: path, inResourceFork: inResourceFork, atomically: atomically)
+
+        self.sendDidWriteNotifications(path: path)
+    }
+
+    private func _write(toPath path: String, inResourceFork: Bool = false, atomically: Bool = false) throws {
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
             if atomically {
                 let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectoryWithStringPath(forPath: path)
@@ -262,7 +308,7 @@ public class CSDataSource {
 
                 do {
                     try callPOSIXFunction(expect: .zero) { lseek(fd, 0, SEEK_SET) }
-                    try self.write(toFileDescriptor: fd, inResourceFork: inResourceFork, truncateFile: true)
+                    try self._write(toFileDescriptor: fd, inResourceFork: inResourceFork, truncateFile: true)
 
                     if self.closeWhenDone {
                         _ = try? self.backing.closeFile()
@@ -279,7 +325,7 @@ public class CSDataSource {
             return
         }
         
-        try write(to: FilePath(path), inResourceFork: inResourceFork)
+        try self._write(to: FilePath(path), inResourceFork: inResourceFork)
     }
     
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
@@ -293,6 +339,23 @@ public class CSDataSource {
             try undoHandler.convertToData()
         }
 
+        try self._write(
+            to: fileDescriptor,
+            inResourceFork: inResourceFork,
+            truncateFile: truncateFile,
+            closeWhenDone: closeWhenDone
+        )
+
+        self.sendDidWriteNotifications(path: nil)
+    }
+
+    @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+    private func _write(
+        to fileDescriptor: FileDescriptor,
+        inResourceFork: Bool = false,
+        truncateFile: Bool = false,
+        closeWhenDone: Bool = false
+    ) throws {
         if !inResourceFork, try self.backing.referencesSameFile(as: fileDescriptor, resourceFork: false) {
             try self.backing.writeInPlace(to: fileDescriptor, truncate: truncateFile)
         } else {
@@ -317,6 +380,22 @@ public class CSDataSource {
             try undoHandler.convertToData()
         }
 
+        try self._write(
+            toFileDescriptor: fd,
+            inResourceFork: inResourceFork,
+            truncateFile: truncateFile,
+            closeWhenDone: closeWhenDone
+        )
+
+        self.sendDidWriteNotifications(path: nil)
+    }
+
+    private func _write(
+        toFileDescriptor fd: Int32,
+        inResourceFork: Bool = false,
+        truncateFile: Bool = false,
+        closeWhenDone: Bool = false
+    ) throws {
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
             if !inResourceFork, try self.backing.referencesSameFile(asFileDescriptor: fd, resourceFork: false) {
                 try self.backing.writeInPlace(to: fd, truncate: truncateFile)
@@ -334,7 +413,7 @@ public class CSDataSource {
             return
         }
         
-        try self.write(to: FileDescriptor(rawValue: fd), inResourceFork: inResourceFork, truncateFile: truncateFile)
+        try self._write(to: FileDescriptor(rawValue: fd), inResourceFork: inResourceFork, truncateFile: truncateFile)
     }
 
     private func generateUUID() -> String {
