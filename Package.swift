@@ -22,6 +22,7 @@ let package = Package(
         )
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-async-algorithms", from: "1.0.0"),
         .package(url: "https://github.com/CharlesJS/CSDataProtocol", from: "0.1.0"),
         .package(url: "https://github.com/CharlesJS/CSErrors", from: "1.2.0"),
         .package(url: "https://github.com/CharlesJS/CSFileInfo", from: "0.4.1"),
@@ -31,6 +32,7 @@ let package = Package(
         .target(
             name: "CSDataSource",
             dependencies: [
+                .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
                 .product(name: "CSDataProtocol", package: "CSDataProtocol"),
                 "CSErrors",
                 "CSFileManager"

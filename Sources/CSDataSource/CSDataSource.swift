@@ -68,8 +68,11 @@ public class CSDataSource {
     public var data: some DataProtocol {
         get throws { try self.backing.data }
     }
-    
+
+    public var bytes: AsyncBytes { AsyncBytes(self) }
+
     public var size: UInt64 { self.backing.size }
+
 
     package var undoHandler: UndoHandler? = nil
 
@@ -131,13 +134,27 @@ public class CSDataSource {
     public func data(in range: some RangeExpression<UInt64>) throws -> some DataProtocol {
         try self.backing.data(in: range)
     }
-    
+
+    public func bytes(in range: some RangeExpression<UInt64>) -> AsyncBytes {
+        AsyncBytes(self, range: range.relative(to: self.backing))
+    }
+
     public func cStringData(startingAt index: UInt64) throws -> some DataProtocol {
         let stringEnd = self.range(of: CollectionOfOne(0), in: index...)?.lowerBound ?? self.size
         
         return try self.data(in: index..<stringEnd)
     }
-    
+
+    public func getBytes(_ bytes: UnsafeMutableRawBufferPointer, in range: some RangeExpression<UInt64>) throws -> Int {
+        try bytes.withMemoryRebound(to: UInt8.self) {
+            try self.getBytes($0, in: range)
+        }
+    }
+
+    public func getBytes(_ bytes: UnsafeMutableBufferPointer<UInt8>, in range: some RangeExpression<UInt64>) throws -> Int {
+        try self.backing.getBytes(bytes, in: range)
+    }
+
     public func range(
         of bytes: some Collection<UInt8>,
         options: SearchOptions = [],

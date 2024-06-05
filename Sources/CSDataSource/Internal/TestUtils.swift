@@ -14,6 +14,13 @@ func emulateOSVersion<T>(_ version: Int, closure: () throws -> T) rethrows -> T 
 
     return try closure()
 }
+
+func emulateOSVersion<T>(_ version: Int, closure: () async throws -> T) async rethrows -> T {
+    emulatedOSVersion = version
+    defer { emulatedOSVersion = .max }
+
+    return try await closure()
+}
 #else
 package func checkVersion(_: Int) -> Bool { true }
 #endif

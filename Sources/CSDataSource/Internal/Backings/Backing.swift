@@ -423,7 +423,7 @@ extension CSDataSource {
             return items
         }
 
-        private func getBytes(
+        func getBytes(
             _ bytes: UnsafeMutableBufferPointer<UInt8>,
             in _range: some RangeExpression<UInt64>
         ) throws -> Int {
