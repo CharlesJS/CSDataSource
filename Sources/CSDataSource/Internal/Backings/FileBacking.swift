@@ -109,6 +109,10 @@ class FileBacking {
     }
 
     func getBytes(_ bytes: UnsafeMutableBufferPointer<UInt8>, in range: Range<UInt64>) throws -> Int {
+        if range.isEmpty {
+            return 0
+        }
+
         switch self.descriptor {
         case .fileDescriptor(let descriptor):
             var returnValue = 0
