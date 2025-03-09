@@ -1,21 +1,13 @@
 {
+  "originHash" : "8a4eb2551197a0d244afc11c25c62f53e9b2d58267f2afd9e4f40c7f0740fc96",
   "pins" : [
-    {
-      "identity" : "csdataprotocol",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/CharlesJS/CSDataProtocol",
-      "state" : {
-        "revision" : "d63a07c50ae31256baa67e6f266ab36c4b16309f",
-        "version" : "0.1.0"
-      }
-    },
     {
       "identity" : "cserrors",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CharlesJS/CSErrors",
       "state" : {
-        "revision" : "86c2073c171adb3aab6a287c9c3f424318965f34",
-        "version" : "1.2.5"
+        "revision" : "776b7813f14e4618701b3c4f33c7ff27be53dfc0",
+        "version" : "2.0.0"
       }
     },
     {
@@ -23,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CharlesJS/CSFileInfo",
       "state" : {
-        "revision" : "3db16415896212e4bc4edafdc820fe207f428406",
-        "version" : "0.4.1"
+        "revision" : "25a6944d7249e4d3659df097c9dd3e2ca24c0256",
+        "version" : "0.5.0"
       }
     },
     {
@@ -32,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CharlesJS/CSFileManager",
       "state" : {
-        "revision" : "6f5f6d8aa31719d72856d9b7c56566ff24c1c100",
-        "version" : "0.3.2"
+        "revision" : "44ce47198d582a1748eeb685d4a1fc8f0813ab3d",
+        "version" : "0.4.0"
       }
     },
     {
@@ -41,8 +33,17 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/CharlesJS/DataParser",
       "state" : {
-        "revision" : "d3c52728ae4799c7a2554957df53071e2b56c6df",
-        "version" : "0.3.2"
+        "revision" : "cac5f86aa5662c7cd7a9ec24758924975fcc1f32",
+        "version" : "0.5.0"
+      }
+    },
+    {
+      "identity" : "hfstypeconversion",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CharlesJS/HFSTypeConversion",
+      "state" : {
+        "revision" : "98602ed31ab4299a749cb258ee2557518144b16a",
+        "version" : "0.1.3"
       }
     },
     {
@@ -71,7 +72,16 @@
         "revision" : "97237cf1bc1feebaeb0febec91c1e1b9e4d839b3",
         "version" : "0.7.0"
       }
+    },
+    {
+      "identity" : "syncpolyfill",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/CharlesJS/SyncPolyfill",
+      "state" : {
+        "revision" : "e91d684e29f0aed3ff1f400769e87eb0854ae981",
+        "version" : "0.1.1"
+      }
     }
   ],
-  "version" : 2
+  "version" : 3
 }

@@ -5,8 +5,8 @@
 //  Created by Charles Srstka on 2/5/23.
 //
 
-import CSDataProtocol
 import CSErrors
+import SyncPolyfill
 import System
 
 #if canImport(Darwin)
@@ -15,9 +15,9 @@ import Darwin
 import Glibc
 #endif
 
-class FileBacking {
-    internal enum Descriptor {
-        case fileDescriptor(Any)
+final class FileBacking: Sendable {
+    internal enum Descriptor: Sendable {
+        case fileDescriptor(any Sendable)
         case legacy(Int32)
         case resourceFork(Int32)
 
@@ -47,12 +47,12 @@ class FileBacking {
     }
 
     internal let descriptor: Descriptor
-    private var isClosed = false
-    var range: Range<UInt64>
+    private let isClosedMutex = Mutex(false)
+    let range: Range<UInt64>
     var size: UInt64 { UInt64(self.range.count) }
     var isEmpty: Bool { self.range.isEmpty }
 
-    @available (macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
+    @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     init(fileDescriptor: FileDescriptor) throws {
         self.descriptor = .fileDescriptor(fileDescriptor)
 
@@ -90,8 +90,10 @@ class FileBacking {
 
     private var fileInfo: stat {
         get throws {
-            if self.isClosed { throw errno(EBADF) }
-            return try callPOSIXFunction(expect: .zero) { fstat(self.descriptor.fd, $0) }
+            try self.isClosedMutex.withLock { isClosed in
+                if isClosed { throw errno(EBADF) }
+                return try callPOSIXFunction(expect: .zero) { fstat(self.descriptor.fd, $0) }
+            }
         }
     }
 
@@ -153,23 +155,25 @@ class FileBacking {
     }
 
     func closeFile(hasClosedFile: inout Bool) throws {
-        if self.isClosed { return }
+        try self.isClosedMutex.withLock { isClosed in
+            if isClosed { return }
 
-        if !hasClosedFile {
-            switch self.descriptor {
-            case .fileDescriptor(let descriptor):
-                if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *) {
-                    try (descriptor as! FileDescriptor).close()
+            if !hasClosedFile {
+                switch self.descriptor {
+                case .fileDescriptor(let descriptor):
+                    if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *) {
+                        try (descriptor as! FileDescriptor).close()
+                    }
+                case .legacy(let fd):
+                    try callPOSIXFunction(expect: .zero) { close(fd) }
+                case .resourceFork(let fd):
+                    try callPOSIXFunction(expect: .zero) { close(fd) }
                 }
-            case .legacy(let fd):
-                try callPOSIXFunction(expect: .zero) { close(fd) }
-            case .resourceFork(let fd):
-                try callPOSIXFunction(expect: .zero) { close(fd) }
+
+                hasClosedFile = true
             }
 
-            hasClosedFile = true
+            isClosed = true
         }
-
-        self.isClosed = true
     }
 }

@@ -1,9 +1,8 @@
 import XCTest
 @testable import CSDataSource
-@testable import CSDataSource_Foundation
-import CSFileInfo
-import CSFileInfo_Foundation
 import CSErrors
+import CSFileInfo
+import SyncPolyfill
 import System
 
 @available(macOS 13.0, *)
@@ -29,7 +28,9 @@ final class CSDataSourceTests: XCTestCase {
 
                 try self.checkMutations(dataSourceMaker: dataSourceMaker)
                 try self.checkRegisterAndUnregisterNotifications(dataSourceMaker: dataSourceMaker)
+#if Foundation
                 try self.checkMultipleUndo(dataSourceMaker: dataSourceMaker)
+#endif
             }
         }
     }
@@ -131,54 +132,72 @@ final class CSDataSourceTests: XCTestCase {
         let originalDataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
         var dataSource = originalDataSource
 
-        func expectingNotifications(before: Range<UInt64>, after: Range<UInt64>, closure: () -> Void) throws {
+        func expectingNotifications(
+            dataSource: CSDataSource,
+            before: Range<UInt64>,
+            after: Range<UInt64>,
+            closure: () -> Void
+        ) throws {
+#if Foundation
             let undoManager = UndoManager()
             dataSource.undoManager = undoManager
             XCTAssertIdentical(dataSource.undoManager, undoManager)
+#endif
 
-            var willChangeRanges: [Range<UInt64>] = []
-            var didChangeRanges: [Range<UInt64>] = []
+            let rangesMutex = Mutex<(willChange: [Range<UInt64>], didChange: [Range<UInt64>])>(([], []))
 
             dataSource.addWillChangeNotification { source, range in
-                XCTAssertIdentical(source, dataSource)
-                willChangeRanges.append(range)
+                rangesMutex.withLock {
+                    XCTAssertIdentical(source, dataSource)
+                    $0.willChange.append(range)
+                }
             }
 
             dataSource.addDidChangeNotification { source, range in
-                XCTAssertIdentical(source, dataSource)
-                didChangeRanges.append(range)
+                rangesMutex.withLock {
+                    XCTAssertIdentical(source, dataSource)
+                    $0.didChange.append(range)
+                }
             }
 
             let oldData = Data(try dataSource.data)
 
             closure()
-            XCTAssertEqual(willChangeRanges, [before])
-            XCTAssertEqual(didChangeRanges, [after])
+            rangesMutex.withLock {
+                XCTAssertEqual($0.willChange, [before])
+                XCTAssertEqual($0.didChange, [after])
+            }
 
             let newData = Data(try dataSource.data)
 
             XCTAssertNotEqual(oldData, newData)
 
+#if Foundation
             undoManager.undo()
-            XCTAssertEqual(willChangeRanges, [before, after])
-            XCTAssertEqual(didChangeRanges, [after, before])
+            rangesMutex.withLock {
+                XCTAssertEqual($0.willChange, [before, after])
+                XCTAssertEqual($0.didChange, [after, before])
+            }
 
             XCTAssertEqual(Data(try dataSource.data), oldData)
 
             undoManager.redo()
-            XCTAssertEqual(willChangeRanges, [before, after, before])
-            XCTAssertEqual(didChangeRanges, [after, before, after])
+            rangesMutex.withLock {
+                XCTAssertEqual($0.willChange, [before, after, before])
+                XCTAssertEqual($0.didChange, [after, before, after])
+            }
 
             XCTAssertEqual(Data(try dataSource.data), newData)
 
             dataSource.undoManager = nil
             XCTAssertNil(dataSource.undoManager)
+#endif
         }
 
         XCTAssertEqual(dataSource.size, 10)
         XCTAssertEqual(try Array(dataSource.data), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-        try expectingNotifications(before: 0..<3, after: 0..<0) {
+        try expectingNotifications(dataSource: dataSource, before: 0..<3, after: 0..<0) {
             dataSource.replaceSubrange(0..<3, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -187,7 +206,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        try expectingNotifications(before: 0..<3, after: 0..<4) {
+        try expectingNotifications(dataSource: dataSource, before: 0..<3, after: 0..<4) {
             dataSource.replaceSubrange(0..<3, with: [0x0a, 0x0b, 0x0c, 0x0d])
         }
         XCTAssertEqual(dataSource.size, 11)
@@ -196,7 +215,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [0x0d, 3, 4])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        try expectingNotifications(before: 7..<10, after: 7..<7) {
+        try expectingNotifications(dataSource: dataSource, before: 7..<10, after: 7..<7) {
             dataSource.replaceSubrange(7..<10, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -205,7 +224,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 3..<6)), [3, 4, 5])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        try expectingNotifications(before: 3..<6, after: 3..<3) {
+        try expectingNotifications(dataSource: dataSource, before: 3..<6, after: 3..<3) {
             dataSource.replaceSubrange(3..<6, with: [])
         }
         XCTAssertEqual(dataSource.size, 7)
@@ -214,7 +233,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 2..<6)), [2, 6, 7, 8])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        try expectingNotifications(before: 3..<3, after: 3..<6) {
+        try expectingNotifications(dataSource: dataSource, before: 3..<3, after: 3..<6) {
             dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
         }
         XCTAssertEqual(dataSource.size, 13)
@@ -223,7 +242,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(try Array(dataSource.data(in: 2..<7)), [2, 0xa, 0xb, 0xc, 3])
 
         dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
-        try expectingNotifications(before: 3..<6, after: 3..<6) {
+        try expectingNotifications(dataSource: dataSource, before: 3..<6, after: 3..<6) {
             dataSource.replaceSubrange(3..<6, with: [0xa, 0xb, 0xc])
         }
         XCTAssertEqual(dataSource.size, 10)
@@ -235,50 +254,64 @@ final class CSDataSourceTests: XCTestCase {
     private func checkRegisterAndUnregisterNotifications(dataSourceMaker: ([UInt8]) throws -> CSDataSource) throws {
         let dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-        var willChangeRanges: [Range<UInt64>] = []
-        var didChangeRanges: [Range<UInt64>] = []
+        let rangesMutex = Mutex<(willChange: [Range<UInt64>], didChange: [Range<UInt64>])>(([], []))
 
-        let willChangeHandler: CSDataSource.ChangeNotification = {
-            XCTAssertIdentical($0, dataSource)
-            willChangeRanges.append($1)
+        let willChangeHandler: CSDataSource.ChangeNotification = { someDataSource, range in
+            rangesMutex.withLock {
+                XCTAssertIdentical(someDataSource, dataSource)
+                $0.willChange.append(range)
+            }
         }
 
-        let didChangeHandler: CSDataSource.ChangeNotification = {
-            XCTAssertIdentical($0, dataSource)
-            didChangeRanges.append($1)
+        let didChangeHandler: CSDataSource.ChangeNotification = { someDataSource, range in
+            rangesMutex.withLock {
+                XCTAssertIdentical(someDataSource, dataSource)
+                $0.didChange.append(range)
+            }
         }
 
         dataSource.replaceSubrange(3..<3, with: [0xa, 0xb, 0xc])
 
-        XCTAssertEqual(willChangeRanges, [])
-        XCTAssertEqual(didChangeRanges, [])
+        rangesMutex.withLock {
+            XCTAssertEqual($0.willChange, [])
+            XCTAssertEqual($0.didChange, [])
+        }
 
         let willChangeID = dataSource.addWillChangeNotification(willChangeHandler)
         let didChangeID = dataSource.addDidChangeNotification(didChangeHandler)
 
         dataSource.replaceSubrange(3..<6, with: [0xd, 0xe, 0xf])
 
-        XCTAssertEqual(willChangeRanges, [3..<6])
-        XCTAssertEqual(didChangeRanges, [3..<6])
+        rangesMutex.withLock {
+            XCTAssertEqual($0.willChange, [3..<6])
+            XCTAssertEqual($0.didChange, [3..<6])
+        }
 
         dataSource.replaceSubrange(2..<5, with: [0x10, 0x11])
 
-        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
-        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4])
+        rangesMutex.withLock {
+            XCTAssertEqual($0.willChange, [3..<6, 2..<5])
+            XCTAssertEqual($0.didChange, [3..<6, 2..<4])
+        }
 
         dataSource.removeNotification(willChangeID)
         dataSource.replaceSubrange(1..<2, with: [0x12, 0x13, 0x14])
 
-        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
-        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
+        rangesMutex.withLock {
+            XCTAssertEqual($0.willChange, [3..<6, 2..<5])
+            XCTAssertEqual($0.didChange, [3..<6, 2..<4, 1..<4])
+        }
 
         dataSource.removeNotification(didChangeID)
         dataSource.replaceSubrange(0..<2, with: [0x15])
 
-        XCTAssertEqual(willChangeRanges, [3..<6, 2..<5])
-        XCTAssertEqual(didChangeRanges, [3..<6, 2..<4, 1..<4])
+        rangesMutex.withLock {
+            XCTAssertEqual($0.willChange, [3..<6, 2..<5])
+            XCTAssertEqual($0.didChange, [3..<6, 2..<4, 1..<4])
+        }
     }
 
+#if Foundation
     private func checkMultipleUndo(dataSourceMaker: ([UInt8]) throws -> CSDataSource) throws {
         let dataSource = try dataSourceMaker([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
@@ -337,13 +370,18 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 6, 7, 8])
 
-        // Test that file backings in the undo stack are converted to data on save
-        if let fileBacking = dataSource.backing.firstFileBacking() {
+        // Test that file backings in the undo stack are converted to data on save;
+        // if the data source continues to point to the file descriptor, the following tests will fail
+        if let path: String = dataSource.mutex.withLock({ state in
+            guard let fileBacking = state.backing.firstFileBacking() else { return nil }
+
             let fd = fileBacking.descriptor.fd
-            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
             _ = fcntl(fd, F_GETPATH, &buffer)
 
-            try dataSource.write(toPath: String(cString: buffer))
+            return String(decoding: buffer, as: UTF8.self)
+        }) {
+            try dataSource.write(toPath: path)
         }
 
         undoManager.undo()
@@ -382,6 +420,7 @@ final class CSDataSourceTests: XCTestCase {
         XCTAssertEqual(dataSource.size, 7)
         XCTAssertEqual(try Array(dataSource.data), [0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 8])
     }
+#endif
 
     private func testSave(
         dataSourceMaker: ([UInt8]) throws -> CSDataSource,
@@ -418,7 +457,9 @@ final class CSDataSourceTests: XCTestCase {
 
         var testFile = try generateTestFileURL()
         var dataSource = try dataSourceMaker(data)
+#if Foundation
         dataSource.undoManager = UndoManager()
+#endif
         try expectWriteNotification(dataSource, testFile) {
             try dataSource.write(to: FilePath(testFile.path), inResourceFork: false, atomically: atomic)
         }
@@ -430,13 +471,15 @@ final class CSDataSourceTests: XCTestCase {
             try dataSource.write(toPath: testFile.path, inResourceFork: false, atomically: atomic)
         }
         XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
-        
+
+#if Foundation
         testFile = try generateTestFileURL()
         dataSource = try dataSourceMaker(data)
         try expectWriteNotification(dataSource, testFile) {
             try dataSource.write(to: testFile, inResourceFork: false, atomically: atomic)
         }
         XCTAssertEqual(try Data(contentsOf: testFile), Data(data))
+#endif
 
         let dummyData = "foo bar baz".data(using: .utf8)!
 
@@ -447,7 +490,7 @@ final class CSDataSourceTests: XCTestCase {
             try dataSource.write(to: FilePath(testFile.path), inResourceFork: true, atomically: atomic)
         }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
-        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: FilePath(testFile.path), key: XATTR_RESOURCEFORK_NAME).data), data)
 
         testFile = try generateTestFileURL()
         try dummyData.write(to: testFile)
@@ -456,8 +499,9 @@ final class CSDataSourceTests: XCTestCase {
             try dataSource.write(toPath: testFile.path, inResourceFork: true, atomically: atomic)
         }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
-        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+        XCTAssertEqual(try [UInt8](ExtendedAttribute(at: FilePath(testFile.path), key: XATTR_RESOURCEFORK_NAME).data), data)
 
+#if Foundation
         testFile = try generateTestFileURL()
         try dummyData.write(to: testFile)
         dataSource = try dataSourceMaker(data)
@@ -466,6 +510,7 @@ final class CSDataSourceTests: XCTestCase {
         }
         XCTAssertEqual(try Data(contentsOf: testFile), dummyData)
         XCTAssertEqual(try [UInt8](ExtendedAttribute(at: testFile, key: XATTR_RESOURCEFORK_NAME).data), data)
+#endif
 
         do {
             testFile = try generateTestFileURL()
@@ -512,6 +557,7 @@ final class CSDataSourceTests: XCTestCase {
         let descriptor = try FileDescriptor.open(url.path, .readWrite)
         defer { _ = try? descriptor.close() }
 
+#if Foundation
         try await self.testDataSource {
             try descriptor.seek(offset: 0, from: .start)
             XCTAssertEqual(ftruncate(descriptor.rawValue, 0), 0)
@@ -519,6 +565,7 @@ final class CSDataSourceTests: XCTestCase {
 
             return try CSDataSource(url: url)
         }
+#endif
 
         try await self.testDataSource {
             try descriptor.seek(offset: 0, from: .start)
@@ -552,6 +599,7 @@ final class CSDataSourceTests: XCTestCase {
             return try CSDataSource(fileDescriptor: descriptor.rawValue, closeWhenDone: false)
         }
 
+#if Foundation
         try await self.testDataSource {
             try descriptor.seek(offset: 0, from: .start)
             XCTAssertEqual(ftruncate(descriptor.rawValue, 0), 0)
@@ -562,6 +610,7 @@ final class CSDataSourceTests: XCTestCase {
                 closeWhenDone: false
             )
         }
+#endif
 
         try await self.testDataSource {
             let newURL = tempURL.appending(component: UUID().uuidString)
@@ -616,14 +665,22 @@ final class CSDataSourceTests: XCTestCase {
 
         try await self.testDataSource {
             try Data($0[3...]).write(to: url)
+#if Foundation
             let dataSource = try CSDataSource(url: url)
+#else
+            let dataSource = try CSDataSource(path: FilePath(url.path))
+#endif
             dataSource.replaceSubrange(0..<0, with: $0[..<3])
             return dataSource
         }
 
         try await self.testDataSource {
             try Data([$0[0]] + $0[4...]).write(to: url)
+#if Foundation
             let dataSource = try CSDataSource(url: url)
+#else
+            let dataSource = try CSDataSource(path: FilePath(url.path))
+#endif
             dataSource.replaceSubrange(1..<1, with: $0[1..<4])
             return dataSource
         }
@@ -639,8 +696,7 @@ final class CSDataSourceTests: XCTestCase {
                 let desc = try FileDescriptor.open(FilePath(tempURL.path), .readWrite)
                 defer { _ = try? desc.close() }
 
-                let writeFuncs: [(CSDataSource) throws -> Void] = [
-                    { try $0.write(to: tempURL) },
+                var writeFuncs: [(CSDataSource) throws -> Void] = [
                     { try $0.write(to: FilePath(tempURL.path)) },
                     { try $0.write(toPath: tempURL.path) },
                     {
@@ -653,6 +709,10 @@ final class CSDataSourceTests: XCTestCase {
                     }
                 ]
 
+#if Foundation
+                writeFuncs.append({ try $0.write(to: tempURL) })
+#endif
+
                 for writeFunc in writeFuncs {
                     try desc.seek(offset: 0, from: .start)
 
@@ -661,12 +721,14 @@ final class CSDataSourceTests: XCTestCase {
                     let dataSource = CSDataSource(initialData)
                     try writeFunc(dataSource)
 
-                    switch dataSource.backing {
-                    case .file(let backing):
-                        let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
-                        XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
-                    default:
-                        XCTFail("data source backing not switched to file")
+                    try dataSource.mutex.withLock {
+                        switch $0.backing {
+                        case .file(let backing):
+                            let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
+                            XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
+                        default:
+                            XCTFail("data source backing not switched to file")
+                        }
                     }
 
                     XCTAssertEqual(try String(contentsOf: tempURL, encoding: .utf8), "initial test data")
@@ -716,12 +778,14 @@ final class CSDataSourceTests: XCTestCase {
                     let dataSource = CSDataSource(initialData)
                     try writeFunc(dataSource, desc)
 
-                    switch dataSource.backing {
-                    case .file(let backing):
-                        let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
-                        XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
-                    default:
-                        XCTFail("data source backing not switched to file")
+                    try dataSource.mutex.withLock {
+                        switch $0.backing {
+                        case .file(let backing):
+                            let info = try FileInfo(atFileDescriptor: backing.descriptor.fd, keys: .fullPath)
+                            XCTAssertEqual(info.pathString.map { URL(filePath: $0) }?.standardizedFileURL, tempURL)
+                        default:
+                            XCTFail("data source backing not switched to file")
+                        }
                     }
 
                     XCTAssertEqual(try String(contentsOf: tempURL, encoding: .utf8), "initial test data00000000000")
@@ -793,19 +857,23 @@ final class CSDataSourceTests: XCTestCase {
         defer { _ = try? FileManager.default.removeItem(at: url) }
         try Data([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]).write(to: url)
 
-        try testClosingTwice(CSDataSource(url: url))
         try testClosingTwice(CSDataSource(path: FilePath(url.path)))
         try testClosingTwice(CSDataSource(path: url.path))
-        try testClosingTwice(CSDataSource(fileHandle: FileHandle(forReadingFrom: url), closeWhenDone: false))
         try testClosingTwice(CSDataSource(fileDescriptor: FileDescriptor.open(url.path, .readOnly), closeWhenDone: false))
         try testClosingTwice(
             CSDataSource(fileDescriptor: FileDescriptor.open(url.path, .readOnly).rawValue, closeWhenDone: false)
         )
+#if Foundation
+        try testClosingTwice(CSDataSource(url: url))
+
         try testClosingTwice(try {
             let dataSource = try CSDataSource(url: url)
             dataSource.replaceSubrange(0..<3, with: [1, 2, 3])
             return dataSource
         }())
+
+        try testClosingTwice(CSDataSource(fileHandle: FileHandle(forReadingFrom: url), closeWhenDone: false))
+#endif
 
         XCTAssertEqual(try self.getOpenFileDescriptors(), startingDescriptors)
     }

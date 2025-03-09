@@ -6,21 +6,23 @@
 //
 
 #if DEBUG
-private var emulatedOSVersion = Int.max
-package func checkVersion(_ requiredVersion: Int) -> Bool { emulatedOSVersion >= requiredVersion }
-func emulateOSVersion<T>(_ version: Int, closure: () throws -> T) rethrows -> T {
-    emulatedOSVersion = version
-    defer { emulatedOSVersion = .max }
+import SyncPolyfill
+
+private let emulatedOSVersionMutex = Mutex<Int>(.max)
+internal func checkVersion(_ requiredVersion: Int) -> Bool { emulatedOSVersionMutex.withLock { $0 >= requiredVersion } }
+internal func emulateOSVersion<T>(_ version: Int, closure: () throws -> T) rethrows -> T {
+    emulatedOSVersionMutex.withLock { $0 = version }
+    defer { emulatedOSVersionMutex.withLock { $0 = .max } }
 
     return try closure()
 }
 
-func emulateOSVersion<T>(_ version: Int, closure: () async throws -> T) async rethrows -> T {
-    emulatedOSVersion = version
-    defer { emulatedOSVersion = .max }
+internal func emulateOSVersion<T>(_ version: Int, closure: () async throws -> T) async rethrows -> T {
+    emulatedOSVersionMutex.withLock { $0 = version }
+    defer { emulatedOSVersionMutex.withLock { $0 = .max } }
 
     return try await closure()
 }
 #else
-package func checkVersion(_: Int) -> Bool { true }
+@inline(__always) internal func checkVersion(_: Int) -> Bool { true }
 #endif

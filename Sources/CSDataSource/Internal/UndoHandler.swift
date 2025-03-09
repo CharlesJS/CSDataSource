@@ -5,11 +5,14 @@
 //  Created by Charles Srstka on 5/27/24.
 //
 
-package protocol UndoManagerProtocol {
-    func registerUndo<TargetType: AnyObject>(withTarget target: TargetType, handler: @escaping (TargetType) -> Void)
-}
+#if Foundation
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
 
-package class UndoHandler {
+internal final class UndoHandler: @unchecked Sendable {
     private static let maxDataSize = 1024 * 1024 * 100
 
     private struct Item {
@@ -20,39 +23,50 @@ package class UndoHandler {
     private var undoStack: [Item] = []
     private var redoStack: [Item] = []
 
-    package let undoManager: any UndoManagerProtocol
+    internal let undoManager: UndoManager
 
-    package init(undoManager: any UndoManagerProtocol) {
+    internal init(undoManager: UndoManager) {
         self.undoManager = undoManager
     }
 
-    func addToUndoStack(dataSource: CSDataSource, range: Range<UInt64>, replacementLength: UInt64) {
+    func addToUndoStack(
+        dataSource: CSDataSource,
+        range: Range<UInt64>,
+        replacementLength: UInt64,
+        backing: CSDataSource.Backing
+    ) {
         undoManager.registerUndo(withTarget: self) { [unowned dataSource] in $0.undo(dataSource: dataSource) }
 
         let replacementRange = range.lowerBound..<(range.lowerBound + replacementLength)
-        undoStack.append(Item(backing: dataSource.backing.slice(range: range), range: replacementRange))
+        
+        undoStack.append(Item(backing: backing.slice(range: range), range: replacementRange))
     }
 
-    func addToRedoStack(dataSource: CSDataSource, range: Range<UInt64>, replacementLength: UInt64) {
+    func addToRedoStack(
+        dataSource: CSDataSource,
+        range: Range<UInt64>,
+        replacementLength: UInt64,
+        backing: CSDataSource.Backing
+    ) {
         undoManager.registerUndo(withTarget: self) { [unowned dataSource] in $0.redo(dataSource: dataSource) }
 
         let replacementRange = range.lowerBound..<(range.lowerBound + replacementLength)
-        redoStack.append(Item(backing: dataSource.backing.slice(range: range), range: replacementRange))
+        redoStack.append(Item(backing: backing.slice(range: range), range: replacementRange))
     }
 
-    package func undo(dataSource: CSDataSource) {
+    internal func undo(dataSource: CSDataSource) {
         guard let item = self.undoStack.popLast() else { return }
 
         dataSource.replaceSubrange(item.range, with: item.backing, isUndo: true)
     }
 
-    package func redo(dataSource: CSDataSource) {
+    internal func redo(dataSource: CSDataSource) {
         guard let item = self.redoStack.popLast() else { return }
 
         dataSource.replaceSubrange(item.range, with: item.backing, isUndo: false)
     }
 
-    package func convertToData() throws {
+    internal func convertToData() throws {
         self.undoStack = try self.convertStackToData(self.undoStack)
         self.redoStack = try self.convertStackToData(self.redoStack)
     }
@@ -84,3 +98,4 @@ package class UndoHandler {
         }
     }
 }
+#endif

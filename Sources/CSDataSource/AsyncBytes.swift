@@ -11,16 +11,6 @@ extension CSDataSource {
     public struct AsyncBytes: AsyncSequence {
         private static let capacity = 16384
 
-        private class DataSourceWrapper {
-            let dataSource: CSDataSource
-            var range: Range<UInt64>
-
-            init(dataSource: CSDataSource, range: Range<UInt64>) {
-                self.dataSource = dataSource
-                self.range = range
-            }
-        }
-
         public typealias Element = UInt8
         private let dataSource: CSDataSource
         private let range: Range<UInt64>
@@ -31,6 +21,16 @@ extension CSDataSource {
         }
 
         public func makeAsyncIterator() -> AsyncBufferedByteIterator {
+            final class DataSourceWrapper: @unchecked Sendable {
+                let dataSource: CSDataSource
+                var range: Range<UInt64>
+
+                init(dataSource: CSDataSource, range: Range<UInt64>) {
+                    self.dataSource = dataSource
+                    self.range = range
+                }
+            }
+
             let wrapper = DataSourceWrapper(dataSource: self.dataSource, range: self.range)
             let capacity = UInt64(Self.capacity)
 

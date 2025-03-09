@@ -3,14 +3,14 @@
 //  CSFoundation
 //
 //  Created by Charles Srstka on 7/14/06.
-//  Copyright 2006-2023 Charles Srstka. All rights reserved.
+//  Copyright 2006-2025 Charles Srstka. All rights reserved.
 //
 
-import CSDataProtocol
 import CSErrors
 import CSFileInfo
 import CSFileInfo
 import CSFileManager
+import SyncPolyfill
 import System
 
 #if canImport(Darwin)
@@ -19,8 +19,16 @@ import Darwin
 import Glibc
 #endif
 
-public class CSDataSource {
-    public struct SearchOptions: OptionSet {
+#if Foundation
+#if canImport(FoundationEssentials)
+import FoundationEssentials
+#else
+import Foundation
+#endif
+#endif
+
+public final class CSDataSource: Sendable {
+    public struct SearchOptions: OptionSet, Sendable {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
         
@@ -30,181 +38,294 @@ public class CSDataSource {
     }
     
     public init(_ data: some Sequence<UInt8>) {
-        self.backing = Backing(data: data)
-        self.closeWhenDone = false
+        self.mutex = Mutex(State(backing: Backing(data: data), closeWhenDone: false))
     }
-    
+
+#if Foundation
+    public convenience init(fileHandle: FileHandle, isResourceFork: Bool = false, closeWhenDone: Bool = false) throws {
+        if #available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, macCatalyst 15.0, *), checkVersion(12) {
+            try self.init(
+                fileDescriptor: FileDescriptor(rawValue: fileHandle.fileDescriptor).duplicate(),
+                inResourceFork: isResourceFork,
+                closeWhenDone: closeWhenDone
+            )
+        } else {
+            try self.init(
+                fileDescriptor: dup(fileHandle.fileDescriptor),
+                inResourceFork: isResourceFork,
+                closeWhenDone: closeWhenDone
+            )
+        }
+
+        try fileHandle.close()
+    }
+#endif
+
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public init(fileDescriptor: FileDescriptor, inResourceFork: Bool = false, closeWhenDone: Bool = false) throws {
-        self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
-        self.closeWhenDone = closeWhenDone
+        self.mutex = try Mutex(State(
+            backing: Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork),
+            closeWhenDone: closeWhenDone
+        ))
     }
     
     public init(fileDescriptor: Int32, inResourceFork: Bool = false, closeWhenDone: Bool = false) throws {
-        self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
-        self.closeWhenDone = closeWhenDone
+        self.mutex = try Mutex(State(
+            backing: Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork),
+            closeWhenDone: closeWhenDone
+        ))
     }
-    
+
+#if Foundation
+    public convenience init(url: URL, isResourceFork: Bool = false) throws {
+        if #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) {
+            try self.init(path: FilePath(url.path))
+            return
+        }
+
+        try self.init(path: url.path)
+    }
+#endif
+
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public init(path: FilePath, inResourceFork: Bool = false) throws {
-        self.backing = try Backing(path: path, isResourceFork: inResourceFork)
-        self.closeWhenDone = true
+        self.mutex = try Mutex(State(
+            backing: Backing(path: path, isResourceFork: inResourceFork),
+            closeWhenDone: true
+        ))
     }
     
     public init(path: String, inResourceFork: Bool = false) throws {
-        self.backing = try Backing(path: path, isResourceFork: inResourceFork)
-        self.closeWhenDone = true
+        self.mutex = try Mutex(State(
+            backing: Backing(path: path, isResourceFork: inResourceFork),
+            closeWhenDone: true
+        ))
     }
 
     deinit {
-        if self.closeWhenDone {
-            _ = try? self.backing.closeFile()
+        try? self.mutex.withLock {
+            if $0.closeWhenDone {
+                try $0.backing.closeFile()
+            }
         }
     }
 
-    internal var backing: Backing
-    private var closeWhenDone: Bool
+    internal struct State {
+        var backing: Backing
+        var closeWhenDone: Bool
+#if Foundation
+        var undoHandler: UndoHandler? = nil
+#endif
+    }
 
-    public var data: some DataProtocol {
-        get throws { try self.backing.data }
+    internal let mutex: Mutex<State>
+
+    public var data: some Collection<UInt8> {
+        get throws { try self.mutex.withLock { try $0.backing.data } }
     }
 
     public var bytes: AsyncBytes { AsyncBytes(self) }
 
-    public var size: UInt64 { self.backing.size }
+    public var size: UInt64 { self.mutex.withLock { $0.backing.size } }
 
+#if Foundation
+    public var undoManager: UndoManager? {
+        get { self.mutex.withLock { $0.undoHandler?.undoManager as? UndoManager } }
+        set { self.mutex.withLock { $0.undoHandler = newValue.map { UndoHandler(undoManager: $0) } } }
+    }
+#endif
 
-    package var undoHandler: UndoHandler? = nil
+    public typealias ChangeNotification = @Sendable (_ dataSource: CSDataSource, _ affectedRange: Range<UInt64>) -> Void
+    private let willChangeNotifications = Mutex<[String : ChangeNotification]>([:])
+    private let didChangeNotifications = Mutex<[String : ChangeNotification]>([:])
 
-    public typealias ChangeNotification = (_ dataSource: CSDataSource, _ affectedRange: Range<UInt64>) -> Void
-    private(set) var willChangeNotifications: [String : ChangeNotification] = [:]
-    private(set) var didChangeNotifications: [String : ChangeNotification] = [:]
-
-    public typealias WriteNotification = (_ dataSource: CSDataSource, _ path: String?) -> Void
-    private(set) var didWriteNotifications: [String : WriteNotification] = [:]
+    public typealias WriteNotification = @Sendable (_ dataSource: CSDataSource, _ path: String?) -> Void
+    private let didWriteNotifications = Mutex<[String : WriteNotification]>([:])
 
     private func sendWillChangeNotifications(range: Range<UInt64>) {
-        for eachNotification in self.willChangeNotifications.values {
-            eachNotification(self, range)
+        self.willChangeNotifications.withLock {
+            for eachNotification in $0.values {
+                eachNotification(self, range)
+            }
         }
     }
 
     private func sendDidChangeNotifications(range: Range<UInt64>) {
-        for eachNotification in self.didChangeNotifications.values {
-            eachNotification(self, range)
+        self.didChangeNotifications.withLock {
+            for eachNotification in $0.values {
+                eachNotification(self, range)
+            }
         }
     }
 
     private func sendDidWriteNotifications(path: String?) {
-        for eachNotification in self.didWriteNotifications.values {
-            eachNotification(self, path)
+        self.didWriteNotifications.withLock {
+            for eachNotification in $0.values {
+                eachNotification(self, path)
+            }
         }
     }
 
     @discardableResult
     public func addWillChangeNotification(_ notification: @escaping ChangeNotification) -> Any {
         let key = self.generateUUID()
-        self.willChangeNotifications[key] = notification
+        self.willChangeNotifications.withLock { $0[key] = notification }
         return key
     }
 
     @discardableResult
     public func addDidChangeNotification(_ notification: @escaping ChangeNotification) -> Any {
         let key = self.generateUUID()
-        self.didChangeNotifications[key] = notification
+        self.didChangeNotifications.withLock { $0[key] = notification }
         return key
     }
 
     @discardableResult
     public func addDidWriteNotification(_ notification: @escaping WriteNotification) -> Any {
         let key = self.generateUUID()
-        self.didWriteNotifications[key] = notification
+        self.didWriteNotifications.withLock { $0[key] = notification }
         return key
     }
 
     public func removeNotification(_ id: Any) {
         guard let key = id as? String else { return }
-        self.willChangeNotifications.removeValue(forKey: key)
-        self.didChangeNotifications.removeValue(forKey: key)
-        self.didWriteNotifications.removeValue(forKey: key)
+        _ = self.willChangeNotifications.withLock { $0.removeValue(forKey: key) }
+        _ = self.didChangeNotifications.withLock { $0.removeValue(forKey: key) }
+        _ = self.didWriteNotifications.withLock { $0.removeValue(forKey: key) }
     }
 
-    public subscript(index: UInt64) -> UInt8 { self.backing[index] }
-    
-    public func data(in range: some RangeExpression<UInt64>) throws -> some DataProtocol {
-        try self.backing.data(in: range)
+    public subscript(index: UInt64) -> UInt8 { self.mutex.withLock { $0.backing[index] } }
+
+    public func data(in range: some RangeExpression<UInt64> & Sendable) throws -> some Collection<UInt8> {
+        try self.mutex.withLock { try $0.backing.data(in: range) }
     }
 
-    public func bytes(in range: some RangeExpression<UInt64>) -> AsyncBytes {
-        AsyncBytes(self, range: range.relative(to: self.backing))
+    public func bytes(in range: some RangeExpression<UInt64> & Sendable) -> AsyncBytes {
+        self.mutex.withLock {
+            AsyncBytes(self, range: range.relative(to: $0.backing))
+        }
     }
 
-    public func cStringData(startingAt index: UInt64) throws -> some DataProtocol {
+    public func cStringData(startingAt index: UInt64) throws -> some Collection<UInt8> {
         let stringEnd = self.range(of: CollectionOfOne(0), in: index...)?.lowerBound ?? self.size
         
         return try self.data(in: index..<stringEnd)
     }
 
-    public func getBytes(_ bytes: UnsafeMutableRawBufferPointer, in range: some RangeExpression<UInt64>) throws -> Int {
+    public func getBytes(
+        _ bytes: UnsafeMutableRawBufferPointer,
+        in range: some RangeExpression<UInt64> & Sendable
+    ) throws -> Int {
         try bytes.withMemoryRebound(to: UInt8.self) {
             try self.getBytes($0, in: range)
         }
     }
 
-    public func getBytes(_ bytes: UnsafeMutableBufferPointer<UInt8>, in range: some RangeExpression<UInt64>) throws -> Int {
-        try self.backing.getBytes(bytes, in: range)
+    private struct BufferBox: @unchecked Sendable {
+        let buffer: UnsafeMutableBufferPointer<UInt8>
+    }
+
+    public func getBytes(
+        _ bytes: UnsafeMutableBufferPointer<UInt8>,
+        in range: some RangeExpression<UInt64> & Sendable
+    ) throws -> Int {
+        let box = BufferBox(buffer: bytes)
+
+        return try self.mutex.withLock { try $0.backing.getBytes(box.buffer, in: range) }
     }
 
     public func range(
-        of bytes: some Collection<UInt8>,
+        of bytes: some Collection<UInt8> & Sendable,
         options: SearchOptions = [],
-        in range: (some RangeExpression<UInt64>)? = nil as Range<UInt64>?
+        in range: (some RangeExpression<UInt64> & Sendable)? = nil as Range<UInt64>?
     ) -> Range<UInt64>? {
-        if let range {
-            return self.backing.range(of: bytes, options: options, in: range)
+        self.mutex.withLock {
+            if let range {
+                return $0.backing.range(of: bytes, options: options, in: range)
+            }
+
+            return $0.backing.range(of: bytes, options: options, in: (0..<$0.backing.size) as Range<UInt64>)
         }
-        
-        return self.backing.range(of: bytes, options: options, in: (0..<self.size) as Range<UInt64>)
     }
     
     public func closeFile() throws {
-        try self.backing.closeFile()
+        try self.mutex.withLock { try $0.backing.closeFile() }
     }
     
     public func replaceSubrange(_ r: some RangeExpression<UInt64>, with bytes: some Collection<UInt8>) {
-        let range = r.relative(to: self.backing)
+        let range = self.mutex.withLock { state in
+            let range = r.relative(to: state.backing)
 
-        self.sendWillChangeNotifications(range: range)
+            self.sendWillChangeNotifications(range: range)
 
-        self.undoHandler?.addToUndoStack(dataSource: self, range: range, replacementLength: UInt64(bytes.count))
-        self.backing.replaceSubrange(range, with: bytes)
+#if Foundation
+            state.undoHandler?.addToUndoStack(
+                dataSource: self,
+                range: range,
+                replacementLength: UInt64(bytes.count),
+                backing: state.backing
+            )
+#endif
+            state.backing.replaceSubrange(range, with: bytes)
+
+            return range
+        }
 
         self.sendDidChangeNotifications(range: range.startIndex..<(range.startIndex + UInt64(bytes.count)))
     }
 
-    func replaceSubrange(_ range: Range<UInt64>, with backing: Backing, isUndo: Bool) {
+    func replaceSubrange(_ range: Range<UInt64>, with newBacking: Backing, isUndo: Bool) {
         self.sendWillChangeNotifications(range: range)
 
-        if let undoHandler = self.undoHandler {
-            if isUndo {
-                undoHandler.addToRedoStack(dataSource: self, range: range, replacementLength: backing.size)
-            } else {
-                undoHandler.addToUndoStack(dataSource: self, range: range, replacementLength: backing.size)
+        self.mutex.withLock { state in
+#if Foundation
+            if let undoHandler = state.undoHandler {
+                if isUndo {
+                    undoHandler.addToRedoStack(
+                        dataSource: self,
+                        range: range,
+                        replacementLength: newBacking.size,
+                        backing: state.backing
+                    )
+                } else {
+                    undoHandler.addToUndoStack(
+                        dataSource: self,
+                        range: range,
+                        replacementLength: newBacking.size,
+                        backing: state.backing
+                    )
+                }
             }
+#endif
+
+            state.backing.replaceSubrange(range, with: newBacking)
         }
 
-        self.backing.replaceSubrange(range, with: backing)
-
-        self.sendDidChangeNotifications(range: range.startIndex..<(range.startIndex + UInt64(backing.size)))
+        self.sendDidChangeNotifications(range: range.startIndex..<(range.startIndex + UInt64(newBacking.size)))
     }
+
+#if Foundation
+    public func write(to url: URL, inResourceFork: Bool = false, atomically: Bool = false) throws {
+        guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
+            try self.write(toPath: url.path, inResourceFork: inResourceFork, atomically: atomically)
+            return
+        }
+
+        try self.write(to: FilePath(url.path), inResourceFork: inResourceFork, atomically: atomically)
+    }
+#endif
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
     public func write(to path: FilePath, inResourceFork: Bool = false, atomically: Bool = false) throws {
-        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(as: path) {
-            try undoHandler.convertToData()
-        }
+        try self.mutex.withLock { state in
+#if Foundation
+            if let undoHandler = state.undoHandler, try state.backing.referencesSameFile(as: path) {
+                try undoHandler.convertToData()
+            }
+#endif
 
-        try self._write(to: path, inResourceFork: inResourceFork, atomically: atomically)
+            try self._write(to: path, inResourceFork: inResourceFork, atomically: atomically, state: &state)
+        }
 
         if #available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, macCatalyst 15.0, *) {
             self.sendDidWriteNotifications(path: path.string)
@@ -214,7 +335,12 @@ public class CSDataSource {
     }
 
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
-    private func _write(to path: FilePath, inResourceFork: Bool = false, atomically: Bool = false) throws {
+    private func _write(
+        to path: FilePath,
+        inResourceFork: Bool = false,
+        atomically: Bool = false,
+        state: inout State
+    ) throws {
         if atomically {
             let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectory(for: path)
             defer { _ = try? CSFileManager.shared.removeItem(at: itemReplacementDir, recursively: true) }
@@ -227,7 +353,7 @@ public class CSDataSource {
 
             do {
                 try fileDescriptor.seek(offset: 0, from: .start)
-                try self.backing.writeFromScratch(to: fileDescriptor, inResourceFork: inResourceFork, truncate: true)
+                try state.backing.writeFromScratch(to: fileDescriptor, inResourceFork: inResourceFork, truncate: true)
 
                 if (try? CSFileManager.shared.itemIsReachable(at: path)) ?? false {
                     try CSFileManager.shared.replaceItem(at: path, withItemAt: tempPath)
@@ -235,12 +361,12 @@ public class CSDataSource {
                     try CSFileManager.shared.moveItem(at: tempPath, to: path)
                 }
 
-                if self.closeWhenDone {
-                    _ = try? self.backing.closeFile()
+                if state.closeWhenDone {
+                    _ = try? state.backing.closeFile()
                 }
 
-                self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
-                self.closeWhenDone = true
+                state.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
+                state.closeWhenDone = true
             } catch {
                 _ = try? fileDescriptor.close()
                 throw error
@@ -255,14 +381,19 @@ public class CSDataSource {
 
             do {
                 try fileDescriptor.seek(offset: 0, from: .start)
-                try self._write(to: fileDescriptor, inResourceFork: inResourceFork, truncateFile: true)
+                try self._write(
+                    to: fileDescriptor,
+                    inResourceFork: inResourceFork,
+                    truncateFile: true,
+                    state: &state
+                )
 
-                if self.closeWhenDone {
-                    _ = try? self.backing.closeFile()
+                if state.closeWhenDone {
+                    _ = try? state.backing.closeFile()
                 }
 
-                self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
-                self.closeWhenDone = true
+                state.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
+                state.closeWhenDone = true
             } catch {
                 _ = try? fileDescriptor.close()
                 throw error
@@ -271,16 +402,30 @@ public class CSDataSource {
     }
     
     public func write(toPath path: String, inResourceFork: Bool = false, atomically: Bool = false) throws {
-        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(asPath: path) {
-            try undoHandler.convertToData()
-        }
+        try self.mutex.withLock { state in
+#if Foundation
+            if let undoHandler = state.undoHandler, try state.backing.referencesSameFile(asPath: path) {
+                try undoHandler.convertToData()
+            }
+#endif
 
-        try self._write(toPath: path, inResourceFork: inResourceFork, atomically: atomically)
+            try self._write(
+                toPath: path,
+                inResourceFork: inResourceFork,
+                atomically: atomically,
+                state: &state
+            )
+        }
 
         self.sendDidWriteNotifications(path: path)
     }
 
-    private func _write(toPath path: String, inResourceFork: Bool = false, atomically: Bool = false) throws {
+    private func _write(
+        toPath path: String,
+        inResourceFork: Bool = false,
+        atomically: Bool = false,
+        state: inout State
+    ) throws {
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
             if atomically {
                 let itemReplacementDir = try CSFileManager.shared.createItemReplacementDirectoryWithStringPath(forPath: path)
@@ -294,7 +439,7 @@ public class CSDataSource {
 
                 do {
                     try callPOSIXFunction(expect: .zero) { lseek(fd, 0, SEEK_SET) }
-                    try self.backing.writeFromScratch(to: fd, inResourceFork: inResourceFork, truncate: true)
+                    try state.backing.writeFromScratch(to: fd, inResourceFork: inResourceFork, truncate: true)
 
                     if (try? CSFileManager.shared.itemIsReachable(atPath: path)) ?? false {
                         try CSFileManager.shared.replaceItem(atPath: path, withItemAtPath: tempPath)
@@ -302,12 +447,12 @@ public class CSDataSource {
                         try CSFileManager.shared.moveItem(atPath: tempPath, toPath: path)
                     }
 
-                    if self.closeWhenDone {
-                        _ = try? self.backing.closeFile()
+                    if state.closeWhenDone {
+                        _ = try? state.backing.closeFile()
                     }
 
-                    self.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
-                    self.closeWhenDone = true
+                    state.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
+                    state.closeWhenDone = true
                 } catch {
                     close(fd)
                     throw error
@@ -317,14 +462,19 @@ public class CSDataSource {
 
                 do {
                     try callPOSIXFunction(expect: .zero) { lseek(fd, 0, SEEK_SET) }
-                    try self._write(toFileDescriptor: fd, inResourceFork: inResourceFork, truncateFile: true)
+                    try self._write(
+                        toFileDescriptor: fd,
+                        inResourceFork: inResourceFork,
+                        truncateFile: true,
+                        state: &state
+                    )
 
-                    if self.closeWhenDone {
-                        _ = try? self.backing.closeFile()
+                    if state.closeWhenDone {
+                        _ = try? state.backing.closeFile()
                     }
 
-                    self.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
-                    self.closeWhenDone = true
+                    state.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
+                    state.closeWhenDone = true
                 } catch {
                     close(fd)
                     throw error
@@ -334,7 +484,7 @@ public class CSDataSource {
             return
         }
         
-        try self._write(to: FilePath(path), inResourceFork: inResourceFork)
+        try self._write(to: FilePath(path), inResourceFork: inResourceFork, state: &state)
     }
     
     @available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *)
@@ -344,16 +494,21 @@ public class CSDataSource {
         truncateFile: Bool = false,
         closeWhenDone: Bool = false
     ) throws {
-        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(as: fileDescriptor) {
-            try undoHandler.convertToData()
-        }
+        try self.mutex.withLock { state in
+#if Foundation
+            if let undoHandler = state.undoHandler, try state.backing.referencesSameFile(as: fileDescriptor) {
+                try undoHandler.convertToData()
+            }
+#endif
 
-        try self._write(
-            to: fileDescriptor,
-            inResourceFork: inResourceFork,
-            truncateFile: truncateFile,
-            closeWhenDone: closeWhenDone
-        )
+            try self._write(
+                to: fileDescriptor,
+                inResourceFork: inResourceFork,
+                truncateFile: truncateFile,
+                closeWhenDone: closeWhenDone,
+                state: &state
+            )
+        }
 
         self.sendDidWriteNotifications(path: nil)
     }
@@ -363,20 +518,21 @@ public class CSDataSource {
         to fileDescriptor: FileDescriptor,
         inResourceFork: Bool = false,
         truncateFile: Bool = false,
-        closeWhenDone: Bool = false
+        closeWhenDone: Bool = false,
+        state: inout State
     ) throws {
-        if !inResourceFork, try self.backing.referencesSameFile(as: fileDescriptor, resourceFork: false) {
-            try self.backing.writeInPlace(to: fileDescriptor, truncate: truncateFile)
+        if !inResourceFork, try state.backing.referencesSameFile(as: fileDescriptor, resourceFork: false) {
+            try state.backing.writeInPlace(to: fileDescriptor, truncate: truncateFile)
         } else {
-            try self.backing.writeFromScratch(to: fileDescriptor, inResourceFork: inResourceFork, truncate: truncateFile)
+            try state.backing.writeFromScratch(to: fileDescriptor, inResourceFork: inResourceFork, truncate: truncateFile)
         }
 
-        if self.closeWhenDone, fileDescriptor.rawValue != self.backing.firstFileBacking()?.descriptor.fd {
-            try self.backing.closeFile()
+        if state.closeWhenDone, fileDescriptor.rawValue != state.backing.firstFileBacking()?.descriptor.fd {
+            try state.backing.closeFile()
         }
 
-        self.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
-        self.closeWhenDone = closeWhenDone
+        state.backing = try Backing(fileDescriptor: fileDescriptor, isResourceFork: inResourceFork)
+        state.closeWhenDone = closeWhenDone
     }
     
     public func write(
@@ -385,16 +541,21 @@ public class CSDataSource {
         truncateFile: Bool = false,
         closeWhenDone: Bool = false
     ) throws {
-        if let undoHandler = self.undoHandler, try self.backing.referencesSameFile(asFileDescriptor: fd) {
-            try undoHandler.convertToData()
-        }
+        try self.mutex.withLock { state in
+#if Foundation
+            if let undoHandler = state.undoHandler, try state.backing.referencesSameFile(asFileDescriptor: fd) {
+                try undoHandler.convertToData()
+            }
+#endif
 
-        try self._write(
-            toFileDescriptor: fd,
-            inResourceFork: inResourceFork,
-            truncateFile: truncateFile,
-            closeWhenDone: closeWhenDone
-        )
+            try self._write(
+                toFileDescriptor: fd,
+                inResourceFork: inResourceFork,
+                truncateFile: truncateFile,
+                closeWhenDone: closeWhenDone,
+                state: &state
+            )
+        }
 
         self.sendDidWriteNotifications(path: nil)
     }
@@ -403,26 +564,33 @@ public class CSDataSource {
         toFileDescriptor fd: Int32,
         inResourceFork: Bool = false,
         truncateFile: Bool = false,
-        closeWhenDone: Bool = false
+        closeWhenDone: Bool = false,
+        state: inout State
     ) throws {
         guard #available(macOS 11.0, iOS 14.0, tvOS 14.0, watchOS 7.0, macCatalyst 14.0, *), checkVersion(11) else {
-            if !inResourceFork, try self.backing.referencesSameFile(asFileDescriptor: fd, resourceFork: false) {
-                try self.backing.writeInPlace(to: fd, truncate: truncateFile)
+            if !inResourceFork, try state.backing.referencesSameFile(asFileDescriptor: fd, resourceFork: false) {
+                try state.backing.writeInPlace(to: fd, truncate: truncateFile)
             } else {
-                try self.backing.writeFromScratch(to: fd, inResourceFork: inResourceFork, truncate: truncateFile)
+                try state.backing.writeFromScratch(to: fd, inResourceFork: inResourceFork, truncate: truncateFile)
             }
 
-            if self.closeWhenDone, fd != self.backing.firstFileBacking()?.descriptor.fd {
-                try self.backing.closeFile()
+            if state.closeWhenDone, fd != state.backing.firstFileBacking()?.descriptor.fd {
+                try state.backing.closeFile()
             }
 
-            self.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
-            self.closeWhenDone = closeWhenDone
+            state.backing = try Backing(fileDescriptor: fd, isResourceFork: inResourceFork)
+            state.closeWhenDone = closeWhenDone
 
             return
         }
         
-        try self._write(to: FileDescriptor(rawValue: fd), inResourceFork: inResourceFork, truncateFile: truncateFile)
+        try self._write(
+            to: FileDescriptor(rawValue: fd),
+            inResourceFork: inResourceFork,
+            truncateFile: truncateFile,
+            closeWhenDone: closeWhenDone,
+            state: &state
+        )
     }
 
     private func generateUUID() -> String {

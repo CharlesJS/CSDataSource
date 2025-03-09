@@ -13,7 +13,7 @@ import Darwin
 import Glibc
 #endif
 
-struct DataBacking {
+struct DataBacking: Sendable {
     var data: ContiguousArray<UInt8>
 
     init(data: some Sequence<UInt8>) {
@@ -26,7 +26,7 @@ struct DataBacking {
     func getBytes(_ buffer: UnsafeMutableBufferPointer<UInt8>, in _range: Range<UInt64>) throws -> Int {
         let range = _range.clamped(to: 0..<self.size)
 
-        self.data.copyBytes(to: buffer, from: Int(range.lowerBound)..<Int(range.upperBound))
+        _ = buffer.update(fromContentsOf: self.data[Int(range.lowerBound)..<Int(range.upperBound)])
 
         return range.count
     }

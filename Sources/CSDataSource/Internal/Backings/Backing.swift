@@ -3,10 +3,9 @@
 //  CSFoundation
 //
 //  Created by Charles Srstka on 5/31/17.
-//  Copyright © 2017-2023 Charles Srstka. All rights reserved.
+//  Copyright © 2017-2025 Charles Srstka. All rights reserved.
 //
 
-import CSDataProtocol
 import CSErrors
 import CSFileManager
 import System
@@ -20,7 +19,7 @@ private let systemWrite = Glibc.write
 #endif
 
 extension CSDataSource {
-    enum Backing {
+    enum Backing: Sendable {
         case data(DataBacking)
         case file(FileBacking)
         case composite(ContiguousArray<Backing>)
@@ -91,7 +90,7 @@ extension CSDataSource {
             }
         }
 
-        var data: some DataProtocol {
+        var data: some Collection<UInt8> {
             get throws {
                 switch self {
                 case .data(let backing):

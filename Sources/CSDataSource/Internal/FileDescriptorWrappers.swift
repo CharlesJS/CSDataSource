@@ -11,13 +11,13 @@ import System
 
 #if canImport(Darwin)
 import Darwin
-private let systemOpen: @convention(c) (UnsafePointer<CChar>, Int32) -> Int32 = Darwin.open
+private func systemOpen(_ path: UnsafePointer<CChar>, _ oflag: Int32) -> Int32 { Darwin.open(path, oflag) }
 private let systemClose = Darwin.close
 private let systemRead = Darwin.read
 private let systemWrite = Darwin.write
 #else
 import Glibc
-private let systemOpen: @convention(c) (UnsafePointer<CChar>, Int32) -> Int32 = Glibc.open
+private func systemOpen(_ path: UnsafePointer<CChar>, _ oflag: Int32) -> Int32 { Glibc.open(path, oflag) }
 private let systemClose = Glibc.close
 private let systemRead = Glibc.read
 private let systemWrite = Glibc.write
